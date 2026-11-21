@@ -215,6 +215,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     url.searchParams.set('pair', id);
     return {
       id,
+      account: pairing.account ?? legacyAccount,
       download: { url: url.href, token: callbackToken },
       installCommand: 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
         ' ' + shellQuote(url.href) + ' | sudo sh',

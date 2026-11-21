@@ -119,7 +119,7 @@ function hostSetup(token) {
     guide.hidden = true;
     for (let attempt = 0; result.state === 'tailnet_pending' && attempt < 60; attempt++) {
       details.textContent = result.needsDeviceApproval
-        ? 'Your tailnet requires device approval. Approve the Maintenance Relay device in Tailscale Machines.'
+        ? 'Your tailnet requires device approval. Approve the PaSTA device in Tailscale Machines.'
         : result.loginUrl ? 'Open Tailscale to complete sign-in. This page will continue when the device joins.'
           : result.deviceTag ? 'Waiting for the tagged device. If device approval is required, approve it in Tailscale Machines.'
             : 'Waiting for Tailscale to connect…';
@@ -198,7 +198,7 @@ function hostSetup(token) {
           }
         };
         title.textContent = 'Pair the selected host';
-        details.textContent = 'The installer asks whether to create or use the maintenance-relay account. It then sends the host fingerprint back here.';
+        details.textContent = 'The installer asks whether to create or use the ' + pair.account + ' account. It then sends the host fingerprint back here.';
       }
       document.querySelector('#host-settings').hidden = true;
       action.hidden = true;

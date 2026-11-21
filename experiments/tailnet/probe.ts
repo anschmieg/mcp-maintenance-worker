@@ -1,6 +1,6 @@
 import { TailnetObject, Tailnet } from './src/index.js';
 import { runEnrollmentCheck, runServiceRestart } from './ssh-check';
-import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, maintenanceAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
+import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, isHostAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 type Key = Awaited<ReturnType<typeof generateSshKey>>;
@@ -163,7 +163,7 @@ export class ProbeNode extends TailnetObject {
   }
 
   async prepareHostKey(address: string, account: HostAccount = legacyAccount) {
-    if (!validTailnetIpv4(address) || (account !== legacyAccount && account !== maintenanceAccount)) return null;
+    if (!validTailnetIpv4(address) || !isHostAccount(account)) return null;
     const slot = 'enrollment-ssh-key:' + address;
     const existing = await this.ctx.storage.get<Key>(slot);
     if (existing) return hostInstallCommand(existing.publicKey, account);

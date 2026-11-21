@@ -29,7 +29,7 @@ async function classify(command: string) {
 }
 
 export class MaintenanceAgent extends McpAgent<Env> {
-  server = new McpServer({name:'maintenance-screening-poc',version:'0.6.0'});
+  server = new McpServer({name:'pasta',version:'0.6.0'});
   async init() {
     const probe_id=z.string().uuid();
     const output=(probe:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(probe)}],structuredContent:{probe,executed:false}});

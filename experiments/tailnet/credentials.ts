@@ -1,8 +1,13 @@
 const api = 'https://api.tailscale.com/api/v2/';
-export const maintenanceAccount = 'maintenance-relay';
+export const maintenanceAccount = 'pasta-mcp';
 export const legacyAccount = 'openbot-tailnet-probe';
-export const tailnetHostname = 'maintenance-relay';
-export type HostAccount = typeof maintenanceAccount | typeof legacyAccount;
+export const tailnetHostname = 'pasta-mcp';
+const hostAccounts = [maintenanceAccount, 'maintenance-relay', legacyAccount] as const;
+export type HostAccount = typeof hostAccounts[number];
+
+export function isHostAccount(value: unknown): value is HostAccount {
+  return hostAccounts.some(account => account === value);
+}
 
 export const guidedTag = 'tag:openbot-probe';
 
@@ -101,7 +106,7 @@ export const forcedCommand =
 
 export function hostInstallCommand(publicKey: string, account: HostAccount = maintenanceAccount) {
   if (!/^ssh-ed25519 [A-Za-z0-9+/]{68}$/u.test(publicKey)) throw new Error('Invalid enrollment public key');
-  if (account !== maintenanceAccount && account !== legacyAccount) throw new Error('Invalid maintenance account');
+  if (!isHostAccount(account)) throw new Error('Invalid maintenance account');
   const escaped = forcedCommand.replace(/["\\]/gu, '\\$&');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
@@ -123,7 +128,7 @@ export function validTailnetIpv4(address: string) {
 }
 
 export function validEnrollmentHost(host: Host) {
-  return (host.account === undefined || host.account === maintenanceAccount || host.account === legacyAccount) &&
+  return (host.account === undefined || isHostAccount(host.account)) &&
     validTailnetIpv4(host.address) && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
 }
 

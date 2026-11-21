@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, maintenanceAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -56,6 +56,13 @@ assert.deepEqual(keyRequest.capabilities.devices.create, {
   ephemeral: false, reusable: false, preauthorized: false, tags: ['tag:openbot-probe'],
 });
 const pinned = 'SHA256:' + createHash('sha256').update(host.publicKey).digest('base64').replace(/=$/, '');
+for (const account of ['maintenance-relay', legacyAccount]) {
+  const previous = { address: '100.64.0.2', fingerprint: pinned, account };
+  assert.ok(validEnrollmentHost(previous));
+  assert.ok(hostInstallCommand(client.publicKey, account).includes('= ' + account + ' &&'));
+  assert.ok(sameEnrollmentHost(previous, { ...previous }));
+  assert.ok(!sameEnrollmentHost(previous, { ...previous, account: 'pasta-mcp' }));
+}
 const devices = await listTailnetDevices({
   TS_OAUTH_CLIENT_ID: 'example-id', TS_OAUTH_CLIENT_SECRET: 'example-secret',
 }, async (_url, options) => {
@@ -79,7 +86,7 @@ let deviceLogin = false;
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
   connection.on('authentication', auth => {
-    if (![maintenanceAccount, legacyAccount].includes(auth.username) || auth.method !== 'publickey') return auth.reject();
+    if (!isHostAccount(auth.username) || auth.method !== 'publickey') return auth.reject();
     const clientPublic = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey))
       .find(key => auth.key.data.equals(key.getPublicSSH()));
     if (!clientPublic) return auth.reject();

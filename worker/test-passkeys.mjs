@@ -140,6 +140,7 @@ assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, i
   state: 'pairing_canceled',
 });
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
+assert.equal(pair.account, 'pasta-mcp');
 assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sudo sh$/u);
 assert.equal(pair.installCommand.split('\n').length, 1);
 async function downloadPairingScript(pair, token = pair.download.token) {
@@ -149,7 +150,7 @@ assert.equal((await fetch(pair.download.url)).status, 403);
 assert.equal((await downloadPairingScript(pair, mcpToken)).status, 403);
 const install = await (await downloadPairingScript(pair)).text();
 assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
-assert.match(install, /account='maintenance-relay'/u);
+assert.match(install, /account='pasta-mcp'/u);
 assert.match(install, /useradd --system --create-home/u);
 assert.ok(install.includes('read -r answer </dev/tty'));
 assert.ok(install.includes('runuser -u "$account"'));
@@ -174,7 +175,7 @@ assert.equal((await post('finish-host-pairing', { token: mcpToken, id: pair.id }
 const hostSetup = await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json();
 assert.equal(hostSetup.state, 'pending');
 assert.equal(hostSetup.host, address);
-assert.equal(hostSetup.execution_identity, 'maintenance-relay');
+assert.equal(hostSetup.execution_identity, 'pasta-mcp');
 assert.equal(hostSetup.account_action, 'created');
 assert.equal(hostSetup.fingerprint, hostPin);
 assert.equal(hostSetup.executed, false);

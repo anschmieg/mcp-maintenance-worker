@@ -1,6 +1,6 @@
-# Maintenance Relay
+# PaSTA
 
-Maintenance Relay provides passkey-approved host maintenance over MCP. OpenBot is one supported client.
+**Passkey-Approved SSH Tool for Agents** provides passkey-approved host maintenance over MCP. PaSTA connects over Tailscale today. OpenBot is one supported MCP client.
 
 `screen_maintenance_command` accepts `{ "command": "..." }`. It uses the `mvdan/sh` Bash parser, then applies exact literal-argument rules. `uptime` and `df -h /srv/techleaddocker` are example `auto_candidate` rules, not a Docker runner design. Everything outside the narrow rule set goes to review, except blank, oversized or syntactically invalid input. Automatic classification accepts only the exact arguments separated by ASCII spaces or tabs. Quotes, comments, terminators, and newlines require review. Hidden control and Unicode formatting characters are invalid.
 
@@ -73,9 +73,9 @@ By default the private probe joins as a regular Tailscale device through Tailsca
 Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes both `/mcp` and `/passkeys/*` to the Worker. Use the exact origin with no trailing slash. Passkeys are scoped to that hostname. Generate a separate random setup code with at least 32 bytes of entropy and set it as the `PASSKEY_SETUP_TOKEN` Worker secret. Give it only to the owner through a private channel.
 
 1. Open `/passkeys/onboard` and enter the setup code. Create your passkey and save it in your device's password manager. If you already registered the passkey, enter the same setup code and select **Continue**.
-2. Select **Sign in to Tailscale**. Open the Tailscale login link and add `maintenance-relay` to your tailnet. The wizard waits for the connection. If your tailnet requires device approval, approve the device in Tailscale **Machines**.
+2. Select **Sign in to Tailscale**. Open the Tailscale login link and add `pasta-mcp` to your tailnet. The wizard waits for the connection. If your tailnet requires device approval, approve the device in Tailscale **Machines**.
 3. In **Add a host**, select one of the devices visible to the Worker. If a machine is missing, check the probe's Tailscale policy or enter its Tailscale IPv4 address manually. The Worker does not need policy-write permission.
-4. Select **Get host setup command**, then run the copied one-line command on the selected Linux host from your regular administrator account. It uses sudo during installation to ask whether to create or use the unprivileged `maintenance-relay` SSH account. Press Enter to cancel. Use a terminal on that host or connect to it over SSH first. The command downloads the script from the Worker using a short-lived pairing credential. Select **Inspect the script before running** to read it first. Keep the command private until pairing completes. It appends the restricted public key and sends the host fingerprint to the Worker over HTTPS using a short-lived, single-use pairing code. Use a POSIX shell, standard OpenSSH paths, and `curl` on the host. Review and approve the check when the page advances. The private probe pins the host key before requesting `openbot-enrollment-check-v1` on port 22. The page displays the result.
+4. Select **Get host setup command**, then run the copied one-line command on the selected Linux host from your regular administrator account. It uses sudo during installation to ask whether to create or use the unprivileged `pasta-mcp` SSH account. Press Enter to cancel. Use a terminal on that host or connect to it over SSH first. The command downloads the script from the Worker using a short-lived pairing credential. Select **Inspect the script before running** to read it first. Keep the command private until pairing completes. It appends the restricted public key and sends the host fingerprint to the Worker over HTTPS using a short-lived, single-use pairing code. Use a POSIX shell, standard OpenSSH paths, and `curl` on the host. Review and approve the check when the page advances. The private probe pins the host key before requesting `openbot-enrollment-check-v1` on port 22. The page displays the result.
 5. Use the same setup page and select **Continue** for each machine. Each new host gets a separate restricted SSH key. Once you finish pairing, remove `PASSKEY_SETUP_TOKEN`. The pilot supports one owner passkey. To revoke the Worker's access to a host or replace its pin, restore the owner-only setup secret if needed, enter the setup code and select **Continue**, and choose **Remove an enrolled host**. Removal blocks new checks and deletes the Worker's private key. A check already running can finish. Remove the old public key from the host's `authorized_keys` file as well. To reconnect the host, repeat pairing with the new key.
 
 ### Approve a service restart
@@ -84,7 +84,7 @@ A Linux administrator can enable the first maintenance operation by installing a
 
 ```ini
 [Unit]
-Description=Maintenance Relay disposable maintenance service
+Description=PaSTA disposable maintenance service
 
 [Service]
 Type=oneshot
@@ -95,10 +95,10 @@ ExecStart=/usr/bin/true
 Use `visudo` to install this rule under `/etc/sudoers.d/`. The SSH account should have only this sudo permission.
 
 ```sudoers
-maintenance-relay ALL=(root) NOPASSWD: /usr/bin/systemctl restart openbot-maintenance-demo.service
+pasta-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart openbot-maintenance-demo.service
 ```
 
-Enroll the host using the current wizard so its SSH key has the latest forced command. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask your MCP client to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. Your MCP client can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
+Enroll the host using the current wizard so its SSH key has the latest forced command. Existing enrollments keep their recorded SSH account. If you enable the restart for an existing enrollment, use that account in the sudo rule. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask your MCP client to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. Your MCP client can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
 
 ### Optional tagged enrollment
 
