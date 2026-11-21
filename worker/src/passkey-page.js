@@ -198,24 +198,28 @@ function hostSetup(token) {
           }
         };
         title.textContent = 'Pair the selected host';
-        details.textContent = 'The setup script installs the restricted SSH key and sends the host fingerprint back here.';
+        details.textContent = 'The installer creates a dedicated SSH account if needed, installs its restricted key, and reports the host fingerprint.';
       }
       document.querySelector('#host-settings').hidden = true;
       action.hidden = true;
-      status.textContent = 'Waiting for the host…';
+      status.textContent = 'Waiting for the command to finish on the selected host. If it fails, check the message in that terminal.';
       for (let attempt = 0; attempt < 180; attempt++) {
         const job = await post('finish-host-pairing', { token, id: pair.id });
         if (job.review_url) {
           location.assign(job.review_url);
           return;
         }
+        if (job.state === 'pairing_expired') break;
         if (job.state !== 'waiting_for_host') {
           status.textContent = 'Host check status: ' + job.state + '.';
           return;
         }
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
-      throw new Error('Pairing expired');
+      document.querySelector('#pair-command').hidden = true;
+      status.textContent = 'This command has expired or was replaced. Generate a fresh one to continue.';
+      action.hidden = false;
+      bind('Generate a new command', connect, 'Could not refresh the host list. Try again.');
     }, 'Host setup did not complete. Reload the page to retry.');
   }
   const failure = 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.';

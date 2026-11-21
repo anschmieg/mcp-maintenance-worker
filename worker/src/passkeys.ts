@@ -217,7 +217,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       id,
       download: { url: url.href, token: callbackToken },
       installCommand: 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
-        ' ' + shellQuote(url.href) + ' | sh',
+        ' ' + shellQuote(url.href) + ' | sudo sh',
     };
   }
 
@@ -233,19 +233,45 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return [
       '#!/bin/sh',
       'pair_host() {',
-      '  if [ "$(id -un)" != openbot-tailnet-probe ]; then',
-      "    printf '%s\n' 'Run this command as the openbot-tailnet-probe user.' >&2",
-      '    return 1',
+      '  PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin; export PATH',
+      '  if [ "$(uname -s)" != Linux ]; then',
+      "    echo 'Run this command on the selected Linux host, in its terminal or over SSH.' >&2; return 1",
       '  fi',
-      "  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}') &&",
-      '  case "$fingerprint" in SHA256:*) ;; *) return 1;; esac &&',
-      '  ' + install + ' &&',
+      '  if [ "$(id -u)" != 0 ]; then',
+      "    echo 'Administrator permission is required. Copy the complete command from setup.' >&2; return 1",
+      '  fi',
+      '  if ! tailscale ip -4 | grep -Fxq -- ' + shellQuote(pair.address) + '; then',
+      "    echo 'This machine is not the selected Tailscale host. Run the command on the selected machine.' >&2; return 1",
+      '  fi',
+      '  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk \'{print $2}\')',
+      '  case "$fingerprint" in SHA256:*) ;; *)',
+      "    echo 'No SSH host key found. Enable OpenSSH Server on this machine, then run the command again.' >&2; return 1;;",
+      '  esac',
+      '  if ! id -u openbot-tailnet-probe >/dev/null 2>&1; then',
+      '    useradd --system --create-home --home-dir /var/lib/openbot-tailnet-probe --shell /bin/sh openbot-tailnet-probe || return 1',
+      '  fi',
+      '  runuser -u openbot-tailnet-probe -- /bin/sh -c ' + shellQuote(install) + ' &&',
       '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + token) +
         ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url.href),
       '}',
       'pair_host',
       '',
     ].join('\n');
+  }
+
+  async cancelPairing(token: unknown, id: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+        typeof id !== 'string' || !uuid.test(id)) return null;
+    return this.ctx.storage.transaction(async tx => {
+      const slot = 'pairing:' + id;
+      const pair = await tx.get<Pairing>(slot);
+      if (!pair) return { state: 'invalidated' };
+      if (pair.fingerprint) return { state: 'already_paired' };
+      const addressSlot = 'pairing-address:' + pair.address;
+      if (await tx.get<string>(addressSlot) === id) await tx.delete(addressSlot);
+      await tx.delete(slot);
+      return { state: 'invalidated' };
+    });
   }
 
   async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown) {
@@ -265,8 +291,8 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const next = 'pairing:' + id;
     const slot = await this.ctx.storage.get<Pairing>(next) ? next : 'pairing';
     const pair = await this.ctx.storage.get<Pairing>(slot);
-    if (pair?.id !== id) return null;
-    if (!pair.fingerprint) return pair.expires > Date.now() ? { state: 'waiting_for_host' } : null;
+    if (pair?.id !== id || (!pair.fingerprint && pair.expires <= Date.now())) return { state: 'pairing_expired' };
+    if (!pair.fingerprint) return { state: 'waiting_for_host' };
     const finishing = this.#finishingPairings.get(id);
     if (finishing) return finishing;
     if (this.#changingHosts.has(pair.address)) return null;
@@ -537,6 +563,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/begin-host-pairing') {
     const pair = await store.beginPairing(body.token, body.address);
     return pair ? reply(pair) : reject(403);
+  }
+  if (path === '/cancel-pairing') {
+    const result = await store.cancelPairing(body.token, body.id);
+    return result ? reply(result) : reject(403);
   }
   if (path === '/finish-host-pairing') {
     const result = await store.finishPairing(body.token, body.id);

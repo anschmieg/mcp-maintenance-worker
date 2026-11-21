@@ -126,8 +126,12 @@ const address = setupResult.devices[0].address;
 const { pinned: hostPin } = await (await fetch(fixture + '/attempts')).json();
 assert.equal((await post('begin-host-pairing', { token: mcpToken, address })).status, 403);
 assert.equal((await post('begin-host-pairing', { token: setupToken, address: '127.0.0.1' })).status, 403);
+const canceledPair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
+assert.equal((await post('cancel-pairing', { token: mcpToken, id: canceledPair.id })).status, 403);
+assert.deepEqual(await (await post('cancel-pairing', { token: setupToken, id: canceledPair.id })).json(), { state: 'invalidated' });
+assert.equal((await downloadPairingScript(canceledPair)).status, 403);
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
-assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sh$/u);
+assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sudo sh$/u);
 assert.equal(pair.installCommand.split('\n').length, 1);
 async function downloadPairingScript(pair, token = pair.download.token) {
   return fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + token } });
@@ -136,6 +140,9 @@ assert.equal((await fetch(pair.download.url)).status, 403);
 assert.equal((await downloadPairingScript(pair, mcpToken)).status, 403);
 const install = await (await downloadPairingScript(pair)).text();
 assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
+assert.match(install, /useradd --system --create-home.*openbot-tailnet-probe/u);
+assert.match(install, /runuser -u openbot-tailnet-probe/u);
+assert.match(install, /tailscale ip -4/u);
 execFileSync('/bin/sh', ['-n', '-c', install]);
 const callbackToken = pair.download.token;
 function hostCallback(token, fingerprint, pairing = pair.id) {
