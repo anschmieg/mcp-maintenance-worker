@@ -41,7 +41,9 @@ const enrollmentKey = await mintTaggedAuthKey({
 assert.equal(enrollmentKey, 'tskey-auth-example');
 assert.equal(oauthRequests[0].options.body.get('scope'), 'auth_keys');
 assert.equal(oauthRequests[0].options.body.get('tags'), 'tag:openbot-probe');
-assert.deepEqual(JSON.parse(oauthRequests[1].options.body).capabilities.devices.create, {
+const keyRequest = JSON.parse(oauthRequests[1].options.body);
+assert.equal(keyRequest.expirySeconds, 86_400);
+assert.deepEqual(keyRequest.capabilities.devices.create, {
   ephemeral: false, reusable: false, preauthorized: false, tags: ['tag:openbot-probe'],
 });
 const pinned = 'SHA256:' + createHash('sha256').update(host.publicKey).digest('base64').replace(/=$/, '');

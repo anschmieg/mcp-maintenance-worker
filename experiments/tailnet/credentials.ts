@@ -29,7 +29,7 @@ export async function mintTaggedAuthKey(env: OAuthSettings, request = fetch) {
     headers: { Authorization: 'Bearer ' + access_token, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       capabilities: { devices: { create: { ephemeral: false, reusable: false, preauthorized: false, tags: [tag] } } },
-      expirySeconds: 600,
+      expirySeconds: 86_400,
     }),
   });
   if (!result.ok) throw new Error('Tailscale enrollment key creation failed');
