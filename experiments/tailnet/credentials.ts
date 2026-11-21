@@ -100,7 +100,7 @@ export function hostInstallCommand(publicKey: string) {
   ].join('\n');
 }
 
-export type Host = { address: string; fingerprint: string };
+export type Host = { address: string; fingerprint: string; enrollmentId?: string };
 
 export function validTailnetIpv4(address: string) {
   if (typeof address !== 'string') return false;
@@ -115,5 +115,6 @@ export function validEnrollmentHost(host: Host) {
 }
 
 export function sameEnrollmentHost(current: Host | undefined, expected: Host) {
-  return current?.address === expected.address && current.fingerprint === expected.fingerprint;
+  return current?.address === expected.address && current.fingerprint === expected.fingerprint &&
+    current.enrollmentId === expected.enrollmentId;
 }

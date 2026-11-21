@@ -27,6 +27,10 @@ export class HostVerifier extends WorkerEntrypoint {
     return (await fetch('http://127.0.0.1:8796/save', { method: 'POST', body: JSON.stringify(host) })).json();
   }
 
+  async removeEnrollmentHost(expected: Host) {
+    return (await fetch('http://127.0.0.1:8796/remove', { method: 'POST', body: JSON.stringify(expected) })).json();
+  }
+
   async runHostEnrollmentCheck(expected: Host) {
     const response = await fetch('http://127.0.0.1:8796/fixture?address=' + encodeURIComponent(expected.address));
     const { port, host, fingerprint, privateKey, interrupt } = await response.json();

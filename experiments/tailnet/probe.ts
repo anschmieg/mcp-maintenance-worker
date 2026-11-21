@@ -46,6 +46,10 @@ export class HostVerifier extends WorkerEntrypoint {
     return this.#node().saveEnrollmentHost(host);
   }
 
+  async removeEnrollmentHost(expected: Host) {
+    return this.#node().removeEnrollmentHost(expected);
+  }
+
   async runHostEnrollmentCheck(expected: Host) {
     return this.#node().runEnrollmentCheck(expected);
   }
@@ -184,12 +188,33 @@ export class ProbeNode extends TailnetObject {
     });
   }
 
+  async removeEnrollmentHost(expected: Host) {
+    if (!validEnrollmentHost(expected)) return false;
+    const slot = 'enrollment-host:' + expected.address;
+    return this.ctx.storage.transaction(async tx => {
+      const legacy = await tx.get<Host>('enrollment-host');
+      const current = await tx.get<Host>(slot) ?? (legacy?.address === expected.address ? legacy : undefined);
+      if (current && !sameEnrollmentHost(current, expected)) return false;
+      await tx.delete(slot);
+      await tx.delete('enrollment-ssh-key:' + expected.address);
+      if (legacy?.address === expected.address) {
+        await tx.delete('enrollment-host');
+        await tx.delete('enrollment-ssh-key');
+      }
+      return true;
+    });
+  }
+
   async runEnrollmentCheck(expected: Host) {
-    const legacy = await this.ctx.storage.get<Host>('enrollment-host');
-    const entry = 'enrollment-host:' + expected.address;
-    const host = await this.ctx.storage.get<Host>(entry) ?? (legacy?.address === expected.address ? legacy : undefined);
-    const key = await this.ctx.storage.get<Key>('enrollment-ssh-key:' + expected.address) ??
-      (legacy?.address === expected.address ? await this.ctx.storage.get<Key>('enrollment-ssh-key') : undefined);
+    const { host, key } = await this.ctx.storage.transaction(async tx => {
+      const legacy = await tx.get<Host>('enrollment-host');
+      const legacyHost = legacy?.address === expected.address ? legacy : undefined;
+      return {
+        host: await tx.get<Host>('enrollment-host:' + expected.address) ?? legacyHost,
+        key: await tx.get<Key>('enrollment-ssh-key:' + expected.address) ??
+          (legacyHost ? await tx.get<Key>('enrollment-ssh-key') : undefined),
+      };
+    });
     if (!host || !key) return { state: 'unconfigured', executed: false };
     if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };
     const tailnet = await this.#readyTailnet();

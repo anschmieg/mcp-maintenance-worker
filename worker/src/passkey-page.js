@@ -44,8 +44,43 @@ function hostSetup(token) {
   const tag = 'tag:openbot-probe';
   policySnippet.value = JSON.stringify({ tagOwners: { [tag]: ['autogroup:admin'] } }, null, 2);
 
+  function showManagedHosts({ managedHosts, devices }) {
+    const section = document.querySelector('#manage-hosts');
+    const select = document.querySelector('#remove-host-address');
+    const button = document.querySelector('#remove-host');
+    const message = document.querySelector('#remove-host-status');
+    select.replaceChildren();
+    section.hidden = !managedHosts?.length;
+    for (const host of managedHosts ?? []) {
+      const name = devices?.find(device => device.address === host.address)?.name;
+      const label = name ? name + ' (' + host.address + ')' : host.address;
+      select.add(new Option(label + (host.removalPending ? ' — removal pending' : ''), host.address));
+    }
+    button.onclick = async () => {
+      const address = select.value;
+      if (!address || !confirm('Remove ' + address + ' from this Worker? A job already running may finish.')) return;
+      button.disabled = true;
+      select.disabled = true;
+      try {
+        const result = await post('remove-host', { token, address });
+        if (result.state === 'removal_pending') {
+          message.textContent = 'New checks are blocked. Select Remove host again to finish removing the SSH key from the Worker.';
+          return;
+        }
+        select.querySelector('option:checked')?.remove();
+        message.textContent = 'Host removed. Remove the old public key from the host’s authorized_keys file as well.';
+      } catch {
+        message.textContent = 'Could not remove the host. Try again.';
+      } finally {
+        button.disabled = select.options.length === 0;
+        select.disabled = button.disabled;
+      }
+    };
+  }
+
   async function connect() {
     let result = await post('prepare-host', { token });
+    showManagedHosts(result);
     if (result.state === 'probe_unavailable') throw new Error('Probe unavailable');
     if (result.state === 'unconfigured') {
       taggedSetup.hidden = false;

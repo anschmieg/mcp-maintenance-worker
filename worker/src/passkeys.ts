@@ -7,7 +7,7 @@ import {
 } from '@simplewebauthn/server';
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
-import { validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { sameEnrollmentHost, validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
@@ -21,7 +21,7 @@ type HostResult =
   | { state: 'diagnostic_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | (Omit<typeof hostCheck, 'host'> & { host: string; fingerprint: string });
+  target: typeof diagnostic | (Omit<typeof hostCheck, 'host'> & { host: string; fingerprint: string; enrollmentId?: string });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
   approved_at?: number;
@@ -43,6 +43,7 @@ export type PasskeyEnv = {
     runHostEnrollmentCheck(expected: Host): Promise<HostResult>;
     prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
     startDeviceLogin(): Promise<boolean>;
+    removeEnrollmentHost(expected: Host): Promise<boolean>;
     prepareHostKey(address: string): Promise<string | null>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
@@ -65,6 +66,8 @@ function setupAuthorized(env: PasskeyEnv, token: unknown) {
 
 export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   #executionOwner = crypto.randomUUID();
+  #changingHosts = new Set<string>();
+  #finishingPairings = new Map<string, Promise<Awaited<ReturnType<PasskeyApproval['start']>> | null>>();
 
   #credential() { return this.ctx.storage.get<WebAuthnCredential>('credential'); }
 
@@ -112,7 +115,14 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async prepareHost(token: unknown) {
     if (!setupAuthorized(this.env, token) || !await this.#credential()) return null;
     if (!this.env.HOST_PROBE) return { state: 'probe_unavailable' };
-    return this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
+    const probe = await this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
+    const inventory = await this.listHosts();
+    const removals = await this.ctx.storage.list<Host>({ prefix: 'removing-host:' });
+    const managedHosts = [
+      ...inventory.hosts.map(({ address }) => ({ address, removalPending: false })),
+      ...[...removals.values()].map(({ address }) => ({ address, removalPending: true })),
+    ];
+    return managedHosts.length ? { ...probe, managedHosts } : probe;
   }
 
   async startDeviceLogin(token: unknown) {
@@ -127,9 +137,54 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return (await this.env.HOST_PROBE?.configureTailnet(clientId, clientSecret).catch(() => false)) ?? false;
   }
 
+  async removeHost(token: unknown, address: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+        typeof address !== 'string' || !validTailnetIpv4(address) || this.#changingHosts.has(address)) return null;
+    this.#changingHosts.add(address);
+    try {
+      const slot = 'onboarding-host:' + address;
+      const removal = 'removing-host:' + address;
+      const host = await this.ctx.storage.transaction(async tx => {
+        const previous = await tx.get<Host>(removal);
+        if (previous) return previous;
+        const legacy = await tx.get<Host>('onboarding-host');
+        const current = await tx.get<Host>(slot) ?? (legacy?.address === address ? legacy : undefined);
+        if (!current) return null;
+        await tx.put(removal, current);
+        await tx.delete(slot);
+        if (legacy?.address === address) await tx.delete('onboarding-host');
+        const pairId = await tx.get<string>('pairing-address:' + address);
+        if (pairId) await tx.delete('pairing:' + pairId);
+        await tx.delete('pairing-address:' + address);
+        const legacyPair = await tx.get<Pairing>('pairing');
+        if (legacyPair?.address === address) await tx.delete('pairing');
+        await tx.delete('last-completed-host-check:' + address);
+        return current;
+      });
+      if (!host) return { state: 'not_enrolled' };
+      const removed = await this.env.HOST_PROBE?.removeEnrollmentHost(host).catch(() => false);
+      if (!removed) return { state: 'removal_pending' };
+      await this.ctx.storage.delete(removal);
+      return { state: 'removed' };
+    } finally {
+      this.#changingHosts.delete(address);
+    }
+  }
+
   async beginPairing(token: unknown, address: unknown) {
     if (!setupAuthorized(this.env, token) || !await this.#credential() ||
         typeof address !== 'string' || !validTailnetIpv4(address)) return null;
+    if (this.#changingHosts.has(address)) return null;
+    this.#changingHosts.add(address);
+    try {
+      if (await this.ctx.storage.get('removing-host:' + address)) return null;
+      return await this.#beginPairing(token, address);
+    } finally {
+      this.#changingHosts.delete(address);
+    }
+  }
+
+  async #beginPairing(token: unknown, address: string) {
     const probe = await this.prepareHost(token);
     if (probe?.state !== 'connected') return null;
     const installCommand = await this.env.HOST_PROBE?.prepareHostKey(address).catch(() => null);
@@ -178,7 +233,32 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const pair = await this.ctx.storage.get<Pairing>(slot);
     if (pair?.id !== id) return null;
     if (!pair.fingerprint) return pair.expires > Date.now() ? { state: 'waiting_for_host' } : null;
-    const host = { address: pair.address, fingerprint: pair.fingerprint };
+    const finishing = this.#finishingPairings.get(id);
+    if (finishing) return finishing;
+    if (this.#changingHosts.has(pair.address)) return null;
+    this.#changingHosts.add(pair.address);
+    const operation = this.#finishPairing(pair, slot, id);
+    this.#finishingPairings.set(id, operation);
+    try {
+      return await operation;
+    } finally {
+      this.#finishingPairings.delete(id);
+      this.#changingHosts.delete(pair.address);
+    }
+  }
+
+  async #finishPairing(pair: Pairing, slot: string, id: string) {
+    const current = await this.ctx.storage.get<Pairing>(slot);
+    if (current?.id !== id || !pair.fingerprint ||
+        await this.ctx.storage.get('removing-host:' + pair.address)) return null;
+    const legacy = await this.ctx.storage.get<Host>('onboarding-host');
+    const host = {
+      address: pair.address, fingerprint: pair.fingerprint,
+      enrollmentId: slot === 'pairing' || (legacy?.address === pair.address && legacy.fingerprint === pair.fingerprint)
+        ? undefined : pair.id,
+    };
+    const existing = await this.ctx.storage.get<Host>('onboarding-host:' + pair.address);
+    if (existing?.fingerprint === pair.fingerprint && !existing.enrollmentId) host.enrollmentId = undefined;
     const saved = await this.env.HOST_PROBE?.saveEnrollmentHost(host).catch(() => false);
     if (!saved) return null;
     const reviewJobId = await this.ctx.storage.transaction(async tx => {
@@ -212,7 +292,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         (legacy?.address === address ? legacy : undefined) : hosts?.values().next().value ?? legacy;
     }
     if (enrollment && !host) return { state: 'host_setup_required', ...empty };
-    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint } : diagnostic;
+    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, enrollmentId: host.enrollmentId } : diagnostic;
     const options = await generateAuthenticationOptions({
       rpID: origin.hostname, userVerification: 'required',
       allowCredentials: [{ id: credential.id, transports: credential.transports }],
@@ -221,7 +301,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const existing = await tx.get<Job>(key);
       if (existing) return existing.target.operation === target.operation &&
         existing.target.host === target.host && (target.dry_run || (!existing.target.dry_run &&
-          existing.target.fingerprint === target.fingerprint));
+          existing.target.fingerprint === target.fingerprint && existing.target.enrollmentId === target.enrollmentId));
       await tx.put<Job>(key, { target, options, expires_at: Date.now() + this.#jobLifetime() });
       return true;
     });
@@ -239,8 +319,10 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       (job.execution_owner !== this.#executionOwner || Date.now() >= job.approved_at + lifetime)
       ? 'check_outcome_unknown' : 'checking_host';
     const approvedState = job.target.dry_run ? 'verified_dry_run' : job.host_result?.state ?? job.host_verification ?? checkingState;
+    const { host, operation, execution_identity, dry_run } = job.target;
     return {
-      job_id: jobId, ...job.target, expires_at: job.expires_at,
+      job_id: jobId, host, operation, execution_identity, dry_run,
+      ...(!job.target.dry_run ? { fingerprint: job.target.fingerprint } : {}), expires_at: job.expires_at,
       ...job.host_result,
       executed: job.host_result ? job.host_result.executed : (
         job.approved_at && job.target.operation === hostCheck.operation ? null : false
@@ -303,7 +385,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       return true;
     });
     if (accepted && !job.target.dry_run) {
-      const expected = { address: job.target.host, fingerprint: job.target.fingerprint };
+      const expected = {
+        address: job.target.host, fingerprint: job.target.fingerprint, enrollmentId: job.target.enrollmentId,
+      };
       this.ctx.waitUntil(this.#verifyHost(key, expected));
     }
     return accepted;
@@ -311,7 +395,12 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async #verifyHost(key: string, expected: Host) {
     let result: HostResult = { state: 'unconfigured', executed: false };
-    if (this.env.HOST_PROBE && validEnrollmentHost(expected)) {
+    const enrolled = await this.ctx.storage.get<Host>('onboarding-host:' + expected.address);
+    const legacy = await this.ctx.storage.get<Host>('onboarding-host');
+    const removing = await this.ctx.storage.get('removing-host:' + expected.address);
+    if (removing || !sameEnrollmentHost(enrolled ?? legacy, expected)) {
+      result = { state: 'target_changed', executed: false };
+    } else if (this.env.HOST_PROBE && validEnrollmentHost(expected)) {
       result = await this.env.HOST_PROBE.runHostEnrollmentCheck(expected)
         .catch(() => ({ state: 'check_outcome_unknown', executed: null }));
     }
@@ -319,6 +408,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const job = await tx.get<Job>(key);
       if (!job?.approved_at) return;
       await tx.put<Job>(key, { ...job, host_result: result });
+      const current = await tx.get<Host>('onboarding-host:' + expected.address);
+      const legacyHost = await tx.get<Host>('onboarding-host');
+      if (!sameEnrollmentHost(current ?? legacyHost, expected)) return;
       for (const slot of ['last-completed-host-check', 'last-completed-host-check:' + expected.address]) {
         const previous = await tx.get<string>(slot);
         const previousJob = previous ? await tx.get<Job>('job:' + previous) : undefined;
@@ -389,6 +481,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/configure-tailnet') {
     const connected = await store.configureTailnet(body.token, body.clientId, body.clientSecret);
     return connected ? reply({ configured: true }) : reject(403);
+  }
+  if (path === '/remove-host') {
+    const removed = await store.removeHost(body.token, body.address);
+    return removed ? reply(removed) : reject(403);
   }
   if (path === '/begin-host-pairing') {
     const pair = await store.beginPairing(body.token, body.address);

@@ -266,6 +266,36 @@ assert.equal((await call('maintenance_host_status', undefined, address)).host, a
 assert.equal(await attempts(), beforeExpiry + 1);
 console.log('PASS: two host targets use distinct client keys and isolated pairing and job IDs');
 
+const staleJob = randomUUID();
+const staleRequest = await call('start_host_enrollment', staleJob, alternateAddress);
+assert.equal(staleRequest.state, 'pending');
+const staleReview = await (await post('review-options', { job: staleJob })).json();
+assert.equal((await post('remove-host', { token: mcpToken, address: alternateAddress })).status, 403);
+await fetch(fixture + '/mode/removal-unavailable', { method: 'POST' });
+assert.deepEqual(await (await post('remove-host', { token: setupToken, address: alternateAddress })).json(),
+  { state: 'removal_pending' });
+assert.deepEqual((await call('maintenance_hosts')).hosts, [{ address }]);
+assert.equal((await call('start_host_enrollment', randomUUID(), alternateAddress)).state, 'host_setup_required');
+assert.equal((await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).status, 403);
+await fetch(fixture + '/mode/normal', { method: 'POST' });
+assert.deepEqual(await (await post('remove-host', { token: setupToken, address: alternateAddress })).json(),
+  { state: 'removed' });
+const newPair = await (await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).json();
+assert.notEqual(installedPublicKey(newPair.installCommand), installedPublicKey(alternatePair.installCommand));
+const newToken = newPair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+assert.equal((await hostCallback(newToken, hostPin, newPair.id)).status, 200);
+assert.equal((await (await post('finish-host-pairing', { token: setupToken, id: newPair.id })).json()).host, alternateAddress);
+const staleAssertion = assertion(0x05, origin, staleReview.options.challenge);
+assert.equal((await post('approve', { job: staleJob, response: staleAssertion })).status, 200);
+for (let retry = 0; retry < 60; retry++) {
+  const current = await call('passkey_test_status', staleJob);
+  if (current.state !== 'checking_host') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal((await call('passkey_test_status', staleJob)).state, 'target_changed');
+assert.equal(await attempts(), beforeExpiry + 1);
+console.log('PASS: removing a host blocks access, retries cleanly, and invalidates old approvals after re-enrollment');
+
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
 await call('start_host_enrollment', hostJob, address);

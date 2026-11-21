@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, validEnrollmentHost,
+  enrollmentCommand, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -20,7 +20,6 @@ const host = generate('ssh-host');
 const client = await generateSshKey();
 const alternateClient = await generateSshKey();
 const clientKeys = new Map([['100.64.0.2', client], ['100.64.0.3', alternateClient]]);
-const clientPublicKeys = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey));
 const installCommand = hostInstallCommand(client.publicKey);
 const forcedLine = installCommand.split('\n').find(line => line.includes('restrict,command='));
 assert.match(forcedLine, /restrict,command=/);
@@ -73,7 +72,8 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
   connection.on('authentication', auth => {
     if (auth.username !== 'openbot-tailnet-probe' || auth.method !== 'publickey') return auth.reject();
-    const clientPublic = clientPublicKeys.find(key => auth.key.data.equals(key.getPublicSSH()));
+    const clientPublic = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey))
+      .find(key => auth.key.data.equals(key.getPublicSSH()));
     if (!clientPublic) return auth.reject();
     if (auth.signature && clientPublic.verify(auth.blob, auth.signature, auth.hashAlgo) !== true) {
       return auth.reject();
@@ -93,12 +93,14 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   });
 });
 await new Promise(resolve => ssh.listen(0, '127.0.0.1', resolve));
-createServer((request, response) => {
+createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const address = url.searchParams.get('address');
   const clientKey = clientKeys.get(address);
   if (url.pathname === '/install') {
-    response.end(JSON.stringify(clientKey ? hostInstallCommand(clientKey.publicKey) : null));
+    const key = clientKey ?? await generateSshKey();
+    clientKeys.set(address, key);
+    response.end(JSON.stringify(hostInstallCommand(key.publicKey)));
   } else if (url.pathname === '/fixture') {
     const target = enrolled.get(address);
     const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : target?.fingerprint;
@@ -129,13 +131,26 @@ createServer((request, response) => {
       if (accepted) tailnetConfigured = true;
       response.end(JSON.stringify(accepted));
     });
+  } else if (request.url === '/remove' && request.method === 'POST') {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      const target = JSON.parse(body);
+      const current = enrolled.get(target.address);
+      const removed = mode !== 'removal-unavailable' && (!current || sameEnrollmentHost(current, target));
+      if (removed) {
+        enrolled.delete(target.address);
+        clientKeys.delete(target.address);
+      }
+      response.end(JSON.stringify(removed));
+    });
   } else if (request.url === '/save' && request.method === 'POST') {
     let body = '';
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       const host = JSON.parse(body);
       const previous = enrolled.get(host.address);
-      const saved = validEnrollmentHost(host) && (!previous || previous.fingerprint === host.fingerprint);
+      const saved = validEnrollmentHost(host) && (!previous || sameEnrollmentHost(previous, host));
       if (saved) enrolled.set(host.address, host);
       response.end(JSON.stringify(saved));
     });
