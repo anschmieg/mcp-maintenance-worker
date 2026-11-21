@@ -34,7 +34,11 @@ export type PasskeyEnv = {
   PASSKEY_ORIGIN?: string;
   PASSKEY_SETUP_TOKEN?: string;
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
-  HOST_PROBE?: { runAmsEnrollmentCheck(): Promise<HostResult> };
+  HOST_PROBE?: {
+    runAmsEnrollmentCheck(): Promise<HostResult>;
+    prepareEnrollment(): Promise<{ state: string; installCommand?: string }>;
+    saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
+  };
 };
 
 export function passkeyOrigin(env: PasskeyEnv) {
@@ -95,6 +99,18 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       await tx.delete('enrollment');
       return true;
     });
+  }
+
+  async prepareHost(token: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential()) return null;
+    if (!this.env.HOST_PROBE) return { state: 'unconfigured' };
+    return this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
+  }
+
+  async saveHost(token: unknown, address: unknown, fingerprint: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+        typeof address !== 'string' || typeof fingerprint !== 'string') return false;
+    return (await this.env.HOST_PROBE?.saveEnrollmentHost({ address, fingerprint }).catch(() => false)) ?? false;
   }
 
   async start(jobId: string, enrollment = false) {
@@ -233,6 +249,14 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/enroll') {
     return await store.enroll(body.token, body.response as RegistrationResponseJSON) ? reply({ enrolled: true }) : reject(403);
   }
+  if (path === '/prepare-host') {
+    const setup = await store.prepareHost(body.token);
+    return setup ? reply(setup) : reject(403);
+  }
+  if (path === '/save-host') {
+    const saved = await store.saveHost(body.token, body.address, body.fingerprint);
+    return saved ? reply(await store.start(crypto.randomUUID(), true)) : reject(403);
+  }
   if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
   if (path === '/review-options') {
     const options = await store.reviewOptions(body.job);
@@ -242,5 +266,6 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return await store.approve(body.job, body.response as AuthenticationResponseJSON)
       ? reply(await store.status(body.job)) : reject(409);
   }
+  if (path === '/job-status') return reply(await store.status(body.job));
   return reject(404);
 }

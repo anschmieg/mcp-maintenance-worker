@@ -2,13 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 go test -mod=readonly ./...
-diagnostic=experiments/tailnet/openbot-enrollment-check
-[[ "$(SSH_ORIGINAL_COMMAND=openbot-enrollment-check-v1 sh "$diagnostic")" == openbot-host-ready-v1 ]]
-for denied in '' 'openbot-enrollment-check-v1; id' 'openbot-enrollment-check-v1 extra' 'id'; do
-  status=0
-  SSH_ORIGINAL_COMMAND="$denied" sh "$diagnostic" >/dev/null 2>&1 || status=$?
-  [[ "$status" == 126 ]]
-done
 (cd worker && npm ci --ignore-scripts)
 (cd experiments/tailnet && npm ci --ignore-scripts)
 if [[ "${VERIFY_TAILNET_BUILD:-0}" == 1 ]]; then

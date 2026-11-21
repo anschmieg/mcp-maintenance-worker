@@ -3,6 +3,14 @@ import { connect } from 'cloudflare:sockets';
 import { runEnrollmentCheck } from '../experiments/tailnet/ssh-check';
 
 export class HostVerifier extends WorkerEntrypoint {
+  async prepareEnrollment() {
+    return (await fetch('http://127.0.0.1:8796/prepare')).json();
+  }
+
+  async saveEnrollmentHost(host: { address: string; fingerprint: string }) {
+    return (await fetch('http://127.0.0.1:8796/save', { method: 'POST', body: JSON.stringify(host) })).json();
+  }
+
   async runAmsEnrollmentCheck() {
     const response = await fetch('http://127.0.0.1:8796/fixture');
     const { port, fingerprint, privateKey, interrupt } = await response.json();

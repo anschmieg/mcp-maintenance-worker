@@ -53,7 +53,7 @@ Use this repository as the source for changes. Keep live endpoints, host targets
   node --env-file=/path/to/private/adapter.env openbot-direct.mjs
   ```
 
-- **Optional Tailnet probe** — provide `PROBE_TOKEN`, `TS_AUTHKEY`, `PROBE_TARGET`, `PROBE_HOST_FINGERPRINT`, and `PROBE_SSH_KEY` as secrets on the isolated probe deployment.
+- **Private Tailnet probe** — configure `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_CLIENT_SECRET`, and `TS_DEVICE_TAG` on the isolated probe. The first two belong in Worker secrets. A scoped, pre-created `TS_AUTHKEY` remains an operator fallback.
 - **GitHub Actions** — tests use a generated local bearer token. Release publication uses GitHub's per-run token. Production credentials are unnecessary for either job.
 
 ## Dependency releases
@@ -64,26 +64,19 @@ The local tests use no production credentials. They cover screening, syntax fact
 
 The optional `experiments/tailnet` probe pins Undershell in an npm lockfile and `tailnet-do` to a Git commit, including its pinned Tailscale submodule. The update workflow builds and bundles that probe against candidate revisions. Tailnet enrollment and host authentication require a separately scoped live test. Only its private RPC entry point can request the fixed diagnostic.
 
-## Fixed SSH diagnostic pilot
+## Pilot onboarding
 
-`experiments/tailnet/openbot-enrollment-check` is the host entry point for OpenSSH hosts with a POSIX shell. An administrator installs it at a root-owned executable path such as `/usr/local/libexec/openbot-enrollment-check`. Use a dedicated unprivileged account without sudo or password login. Authorize the pilot's Ed25519 public key with this entry in the account's authorized keys file:
-
-```text
-restrict,command="/usr/local/libexec/openbot-enrollment-check" ssh-ed25519 PUBLIC_KEY
-```
-
-Keep the account's authorized keys and forced command under administrator control. Scope the Worker tailnet identity to SSH on the pilot host. Configure the Worker with the pinned host fingerprint and the dedicated private key through runtime secrets. The SSH request must supply exactly `openbot-enrollment-check-v1`. The host handler returns one line containing `openbot-host-ready-v1` and exits with status zero. The POSIX implementation uses shell built-ins. A non-POSIX host needs a restricted handler for the same request and response. The Worker accepts LF and CRLF line endings.
-
-Before connecting a real SSH job, bind approval to the job ID, target, operation, approved execution identity, and expiry. Persist consumption before opening SSH. If the outcome is unknown after starting SSH, keep that state for status queries and require a fresh approval before another attempt.
-
-## Owner passkey setup and approval dry run
+The private probe joins through a dedicated tagged Tailscale identity. An administrator creates a tag and a [Tailscale OAuth client](https://tailscale.com/docs/features/oauth-clients) scoped to `auth_keys` for that tag. Limit the tag to TCP port 22 on the pilot host. Configure the OAuth client credentials and tag on the private probe. When the owner connects Tailscale from the onboarding page, the probe obtains a short-lived, single-use key for a persistent tagged node. It leaves Tailscale device approval in effect. This pilot uses service OAuth credentials and does not require the owner to grant the probe their personal Tailscale identity. If an enrolled probe identity is revoked, an administrator must reset that probe before joining again.
 
 Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes both `/mcp` and `/passkeys/*` to the Worker. Use the exact origin with no trailing slash. Passkeys are scoped to that hostname. Generate a separate random setup code with at least 32 bytes of entropy and set it as the `PASSKEY_SETUP_TOKEN` Worker secret. Give it only to the owner through a private channel.
 
-1. On the owner's device, open `/passkeys/onboard` on that origin. Enter the setup code and select **Create passkey**. Save the passkey in the device's password manager. The Worker stores the credential's public key and accepts only the first successful enrollment. Remove `PASSKEY_SETUP_TOKEN` once enrollment succeeds. This pilot supports one owner credential and has no self-service recovery.
-2. Call `start_passkey_test` with a fresh UUID and open the review URL on the owner's device. It displays the fixed job and asks for a passkey. After approving, query `passkey_test_status` with the same UUID, including from a new MCP session. This tests approval only. The status reports `executed: false`.
-3. To enroll the pilot host, a host administrator installs the forced command and adds the public key to the dedicated `openbot-tailnet-probe` account. Configure the isolated Tailnet probe with that private key, the host endpoint and the verified SSH fingerprint, using runtime secrets. Restrict its Tailnet identity to TCP port 22 on `ams`. Add the RPC service binding below to the maintenance Worker deployment config.
-4. Call `start_host_enrollment` with a fresh UUID and approve its review page with your passkey. The probe checks the pinned SSH host key, logs into the dedicated account, and requests the fixed `openbot-enrollment-check-v1` diagnostic once. Use `passkey_test_status` to read its output and exit status or `maintenance_host_status` to see the most recent completed check for `ams`.
+1. Open `/passkeys/onboard` and enter the setup code. Create your passkey and save it in your device's password manager. If you already registered the passkey, use **Continue host setup** with the same setup code.
+2. Select **Connect Tailscale**. If the Tailnet requires device approval, approve the dedicated probe in the Tailscale admin console and retry. The probe generates an Ed25519 SSH keypair and retains the private key in its Durable Object. Copy the command the page generates for the public key.
+3. On `ams`, have an administrator create the dedicated unprivileged `openbot-tailnet-probe` SSH account. Use a POSIX shell under that account to run the copied command. It appends a restricted public-key entry to the default `~/.ssh/authorized_keys` file and prints the server's Ed25519 fingerprint using `ssh-keygen`. This assumes standard OpenSSH paths and an enabled Ed25519 host key. Use the administrator's trusted host console to get the fingerprint and the host's Tailscale IPv4 address.
+4. Enter the address and fingerprint in the onboarding page. Review the check and approve it with the passkey. The private probe pins the host key and requests `openbot-enrollment-check-v1` on port 22. The `authorized_keys` entry uses shell built-ins to validate the request and return `openbot-host-ready-v1`. No standalone host script is installed. The page displays the result. You can also request another check in OpenBot with `start_host_enrollment` and inspect results using `passkey_test_status` or `maintenance_host_status`.
+5. Remove `PASSKEY_SETUP_TOKEN` after setup. The pilot supports one owner passkey and one fixed SSH enrollment. Changing the host pin or address requires an administrator reset of the pilot state.
+
+Add the following service binding to the maintenance Worker's deployment config:
 
 ```json
 {

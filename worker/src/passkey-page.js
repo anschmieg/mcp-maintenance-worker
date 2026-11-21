@@ -30,19 +30,52 @@ function bind(label, run, failure) {
   };
 }
 
+function hostSetup(token) {
+  title.textContent = 'Connect Tailscale';
+  details.textContent = 'The Worker will join with the dedicated identity configured by your Tailscale administrator.';
+  setup.hidden = true;
+  document.querySelector('#resume').hidden = true;
+  tokenInput.value = '';
+  bind('Connect Tailscale', async () => {
+    const result = await post('prepare-host', { token });
+    if (result.state !== 'connected') {
+      details.textContent = 'The Tailnet connection is pending. Check the probe settings or approve the device in Tailscale if required, then try again.';
+      action.disabled = false;
+      return;
+    }
+    title.textContent = 'Add the pilot host';
+    details.textContent = 'Create the dedicated account openbot-tailnet-probe on ams. Run this command from that account, then enter its Tailscale IPv4 address and the SHA256 fingerprint printed by the command.';
+    const command = document.querySelector('#install-command');
+    command.value = result.installCommand;
+    command.hidden = false;
+    document.querySelector('#host-settings').hidden = false;
+    bind('Save host and review check', async () => {
+      const address = document.querySelector('#address').value.trim();
+      const fingerprint = document.querySelector('#fingerprint').value.trim();
+      const job = await post('save-host', { token, address, fingerprint });
+      if (!job.review_url) throw new Error('Review unavailable');
+      location.assign(job.review_url);
+    }, 'The address or fingerprint could not be saved. Check both values. The pilot host cannot be changed after it is saved.');
+  }, 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.');
+}
+
 if (location.pathname.endsWith('/onboard')) {
   title.textContent = 'Create your maintenance passkey';
   details.textContent = 'Enter the one-time code, then save the passkey in your device’s password manager.';
   setup.hidden = false;
+  const resume = document.querySelector('#resume');
+  resume.hidden = false;
+  resume.onclick = () => hostSetup(tokenInput.value);
   bind('Continue', async () => {
     const token = tokenInput.value;
     const optionsJSON = await post('enrollment-options', { token });
     setup.hidden = true;
+    resume.hidden = true;
     tokenInput.value = '';
     bind('Create passkey', async () => {
       const response = await SimpleWebAuthnBrowser.startRegistration({ optionsJSON });
       await post('enroll', { token, response });
-      status.textContent = 'Passkey registered. Return to OpenBot to request an approval test.';
+      hostSetup(token);
     }, 'Passkey setup did not complete. Retry or reload to enter the setup code again.');
   }, 'The setup code was rejected or a passkey is already registered.');
 } else {
@@ -55,8 +88,19 @@ if (location.pathname.endsWith('/onboard')) {
         request.host + ' first. This check verifies the pinned host key and runs openbot-enrollment-check-v1 once over SSH.';
     bind('Approve with passkey', async () => {
       const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
-      await post('approve', { job, response });
-      status.textContent = 'Approval verified. You can close this tab and return to OpenBot to check the result.';
+      const approved = await post('approve', { job, response });
+      if (request.dry_run) {
+        status.textContent = 'Approval verified. You can close this tab and return to OpenBot to check the result.';
+        return;
+      }
+      status.textContent = 'Approval verified. Checking SSH enrollment…';
+      let result = approved;
+      for (let attempt = 0; result.state === 'checking_host' && attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        result = await post('job-status', { job }).catch(() => result);
+      }
+      status.textContent = result.state === 'verified' ? 'Host enrollment verified.'
+        : 'Host check status: ' + result.state + '. Check job ' + job + ' in OpenBot for the result.';
     }, 'Approval did not complete. Retry or return to OpenBot if the request expired.');
   }).catch(() => {
     status.textContent = 'This request is unavailable, expired, or already approved.';

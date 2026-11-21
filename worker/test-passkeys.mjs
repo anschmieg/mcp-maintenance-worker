@@ -47,6 +47,8 @@ if (process.argv[3] === 'after-restart') {
 const job = randomUUID();
 assert.equal((await call('start_passkey_test', job)).state, 'enrollment_required');
 assert.equal((await post('enrollment-options', { token: mcpToken })).status, 403);
+assert.equal((await post('prepare-host', { token: setupToken })).status, 403);
+assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken }, 'https://other.example')).status, 403);
 assert.equal((await fetch(origin + '/passkeys/onboard')).status, 200);
 assert.match(await (await fetch(origin + '/passkeys/browser.js')).text(), /startRegistration/);
@@ -80,6 +82,22 @@ const registration = {
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 200);
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
+assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
+const setupResult = await (await post('prepare-host', { token: setupToken })).json();
+assert.deepEqual(Object.keys(setupResult).sort(), ['installCommand', 'state']);
+assert.equal(setupResult.state, 'connected');
+assert.match(setupResult.installCommand, /restrict,command=/);
+assert.doesNotMatch(setupResult.installCommand, /PRIVATE KEY|tskey-auth-/u);
+const hostPin = 'SHA256:' + 'A'.repeat(43);
+assert.equal((await post('save-host', { token: mcpToken, address: '100.64.0.2', fingerprint: hostPin })).status, 403);
+assert.equal((await post('save-host', { token: setupToken, address: '127.0.0.1', fingerprint: hostPin })).status, 403);
+assert.equal((await post('save-host', { token: setupToken, address: '100.64.0.2', fingerprint: 'none' })).status, 403);
+const hostSetup = await (await post('save-host', { token: setupToken, address: '100.64.0.2', fingerprint: hostPin })).json();
+assert.equal(hostSetup.state, 'pending');
+assert.equal(hostSetup.executed, false);
+assert.equal((await post('save-host', { token: setupToken, address: '100.64.0.3', fingerprint: hostPin })).status, 403);
+assert.equal(await attempts(), 0);
+console.log('PASS: owner setup emits a public key installation command and pins the host before review');
 
 const pending = await call('start_passkey_test', job);
 assert.equal(pending.state, 'pending');

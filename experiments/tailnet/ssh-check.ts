@@ -1,4 +1,5 @@
 import { SshClient } from '@workeryard/undershell';
+import { enrollmentCommand, enrollmentMarker } from './credentials';
 
 type SshSocket = Parameters<typeof SshClient.connect>[0]['socket'];
 type Credentials = { PROBE_SSH_KEY: string; PROBE_HOST_FINGERPRINT: string };
@@ -30,12 +31,12 @@ export async function withSsh<T>(socket: SshSocket, credentials: Credentials, ac
 
 export async function runEnrollmentCheck(socket: SshSocket, credentials: Credentials) {
   const result = await withSsh(socket, credentials, async ssh => {
-    const command = await ssh.exec('openbot-enrollment-check-v1', {
+    const command = await ssh.exec(enrollmentCommand, {
       signal: AbortSignal.timeout(5000),
       maxOutputBytes: 1024,
     });
     const response = command.stdout.replace(/\r?\n$/u, '');
-    if (command.exitStatus === 0 && !command.truncated && response === 'openbot-host-ready-v1') {
+    if (command.exitStatus === 0 && !command.truncated && response === enrollmentMarker) {
       return { state: 'verified', executed: true, stdout: response, exit_status: 0 };
     }
     return { state: 'diagnostic_failed', executed: null, exit_status: command.exitStatus };
