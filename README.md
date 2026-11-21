@@ -42,6 +42,20 @@ The Worker sends only commands classified as `review` to the Cloudflare Workers 
 
 For deployment, set the runtime secret and configure a dedicated HTTPS route; `workers_dev` and preview URLs are off by default. No host networking or process execution is part of this service. Configure the Portal upstream with its documented `bearer` authentication mode. Test direct access first, then try the same two examples through OpenBot and the Portal. Do not remove endpoint authentication if the Portal fails to connect or relay the form.
 
+## Runtime configuration
+
+Use this repository as the source for changes. Keep live endpoints, host targets, fingerprints, and credentials in the runtime configuration of the component that consumes them.
+
+- **Worker** — store `MCP_BEARER_TOKEN` as a Cloudflare Worker secret. Cloudflare CLI authentication belongs in the operator's local credential store.
+- **OpenBot stdio adapter** — provide `MCP_WORKER_URL` and `MCP_BEARER_TOKEN` at startup. Node 22 can load them from an owner-readable file outside the checkout. Run the following from `worker/` after installing its locked dependencies.
+
+  ```sh
+  node --env-file=/path/to/private/adapter.env openbot-direct.mjs
+  ```
+
+- **Optional Tailnet probe** — provide `PROBE_TOKEN`, `TS_AUTHKEY`, `PROBE_TARGET`, `PROBE_HOST_FINGERPRINT`, and `PROBE_SSH_KEY` as secrets on the isolated probe deployment.
+- **GitHub Actions** — tests use a generated local bearer token. Release publication uses GitHub's per-run token. Production credentials are unnecessary for either job.
+
 ## Dependency releases
 
 The Worker uses exact npm versions and `worker/package-lock.json`. Go uses `go.mod` and `go.sum`. GitHub Actions checks direct Go and npm dependencies daily and on manual dispatch. If the manifests change, it installs the candidate set and runs Go tests, the WebAssembly build, and local Worker MCP tests. A successful run commits only the tested manifests and publishes a GitHub release tagged to that commit. Publishing stops if the branch moved during validation. Releases do not deploy to Cloudflare.
