@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
+import { sameEnrollmentHost, type Host } from '../experiments/tailnet/credentials';
 import { runEnrollmentCheck } from '../experiments/tailnet/ssh-check';
 
 export class HostVerifier extends WorkerEntrypoint {
@@ -10,17 +11,26 @@ export class HostVerifier extends WorkerEntrypoint {
     return response.json();
   }
 
+  async startDeviceLogin() {
+    return (await fetch('http://127.0.0.1:8796/start-device-login', { method: 'POST' })).json();
+  }
+
   async prepareEnrollment() {
     return (await fetch('http://127.0.0.1:8796/prepare')).json();
+  }
+
+  async prepareHostKey(address: string) {
+    return (await fetch('http://127.0.0.1:8796/install?address=' + encodeURIComponent(address))).json();
   }
 
   async saveEnrollmentHost(host: { address: string; fingerprint: string }) {
     return (await fetch('http://127.0.0.1:8796/save', { method: 'POST', body: JSON.stringify(host) })).json();
   }
 
-  async runHostEnrollmentCheck() {
-    const response = await fetch('http://127.0.0.1:8796/fixture');
-    const { port, fingerprint, privateKey, interrupt } = await response.json();
+  async runHostEnrollmentCheck(expected: Host) {
+    const response = await fetch('http://127.0.0.1:8796/fixture?address=' + encodeURIComponent(expected.address));
+    const { port, host, fingerprint, privateKey, interrupt } = await response.json();
+    if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };
     const socket = connect({ hostname: '127.0.0.1', port });
     const report = await runEnrollmentCheck({
       readable: socket.readable,

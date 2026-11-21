@@ -7,21 +7,21 @@ import {
 } from '@simplewebauthn/server';
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
-import { validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
 const empty = { executed: false };
-const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: 'openbot-tailnet-probe', dry_run: true };
-const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false };
-type HostVerification = 'unconfigured' | 'host_key_unverified' | 'ssh_authentication_failed' | 'verified' | 'connection_failed';
+const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: 'openbot-tailnet-probe', dry_run: true } as const;
+const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false } as const;
+type HostVerification = 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed' | 'verified' | 'connection_failed';
 type HostResult =
   | { state: 'verified'; executed: true; stdout: string; exit_status: 0 }
-  | { state: 'unconfigured' | 'host_key_unverified' | 'ssh_authentication_failed'; executed: false }
+  | { state: 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed'; executed: false }
   | { state: 'diagnostic_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | (typeof hostCheck & { fingerprint?: string });
+  target: typeof diagnostic | (Omit<typeof hostCheck, 'host'> & { host: string; fingerprint: string });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
   approved_at?: number;
@@ -30,7 +30,7 @@ type Job = {
   host_result?: HostResult;
 };
 type Enrollment = { challenge: string; expires: number };
-type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string };
+type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string };
 const pairingLifetime = 15 * 60_000;
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -40,8 +40,10 @@ export type PasskeyEnv = {
   PASSKEY_SETUP_TOKEN?: string;
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
   HOST_PROBE?: {
-    runHostEnrollmentCheck(): Promise<HostResult>;
-    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[] }>;
+    runHostEnrollmentCheck(expected: Host): Promise<HostResult>;
+    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
+    startDeviceLogin(): Promise<boolean>;
+    prepareHostKey(address: string): Promise<string | null>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
   };
@@ -109,8 +111,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async prepareHost(token: unknown) {
     if (!setupAuthorized(this.env, token) || !await this.#credential()) return null;
-    if (!this.env.HOST_PROBE) return { state: 'unconfigured' };
+    if (!this.env.HOST_PROBE) return { state: 'probe_unavailable' };
     return this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
+  }
+
+  async startDeviceLogin(token: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential()) return false;
+    return (await this.env.HOST_PROBE?.startDeviceLogin().catch(() => false)) ?? false;
   }
 
   async configureTailnet(token: unknown, clientId: unknown, clientSecret: unknown) {
@@ -124,57 +131,86 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (!setupAuthorized(this.env, token) || !await this.#credential() ||
         typeof address !== 'string' || !validTailnetIpv4(address)) return null;
     const probe = await this.prepareHost(token);
-    if (probe?.state !== 'connected' || !('installCommand' in probe) || !probe.installCommand) return null;
+    if (probe?.state !== 'connected') return null;
+    const installCommand = await this.env.HOST_PROBE?.prepareHostKey(address).catch(() => null);
+    if (!installCommand) return null;
     const callbackToken = crypto.randomUUID() + crypto.randomUUID();
     const id = crypto.randomUUID();
     const pairing = await this.ctx.storage.transaction(async tx => {
-      const previous = await tx.get<Pairing>('pairing');
-      if (previous?.fingerprint) return previous.address === address ? previous : null;
-      if (await tx.get('onboarding-host')) return null;
+      const slot = 'pairing-address:' + address;
+      const previousId = await tx.get<string>(slot);
+      const previous = previousId ? await tx.get<Pairing>('pairing:' + previousId) : undefined;
+      if (previous?.fingerprint) return previous;
+      if (previousId) await tx.delete('pairing:' + previousId);
       const next = { id, address, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
-      await tx.put<Pairing>('pairing', next);
+      await tx.put('pairing:' + id, next);
+      await tx.put(slot, id);
       return next;
     });
     if (!pairing) return null;
     if (pairing.fingerprint) return { id: pairing.id };
-    const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env)).href;
+    const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
+    url.searchParams.set('pair', id);
     return {
-      id, installCommand: probe.installCommand + ' &&\n' +
+      id, installCommand: installCommand + ' &&\n' +
         '  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk \'{print $2}\') &&\n' +
         '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
-        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url),
+        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url.href),
     };
   }
 
-  async receiveFingerprint(callbackToken: string, fingerprint: unknown) {
-    if (!/^[0-9a-f-]{72}$/u.test(callbackToken) ||
+  async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown) {
+    if ((id !== null && !uuid.test(id)) || !/^[0-9a-f-]{72}$/u.test(callbackToken) ||
         typeof fingerprint !== 'string' || !/^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)) return false;
     return this.ctx.storage.transaction(async tx => {
-      const pair = await tx.get<Pairing>('pairing');
+      const slot = id === null ? 'pairing' : 'pairing:' + id;
+      const pair = await tx.get<Pairing>(slot);
       if (!pair || pair.fingerprint || pair.expires <= Date.now() || pair.tokenHash !== hashToken(callbackToken)) return false;
-      await tx.put<Pairing>('pairing', { ...pair, fingerprint, tokenHash: '' });
+      await tx.put<Pairing>(slot, { ...pair, fingerprint, tokenHash: '' });
       return true;
     });
   }
 
   async finishPairing(token: unknown, id: unknown) {
     if (!setupAuthorized(this.env, token) || typeof id !== 'string') return null;
-    const pair = await this.ctx.storage.get<Pairing>('pairing');
+    const next = 'pairing:' + id;
+    const slot = await this.ctx.storage.get<Pairing>(next) ? next : 'pairing';
+    const pair = await this.ctx.storage.get<Pairing>(slot);
     if (pair?.id !== id) return null;
     if (!pair.fingerprint) return pair.expires > Date.now() ? { state: 'waiting_for_host' } : null;
     const host = { address: pair.address, fingerprint: pair.fingerprint };
     const saved = await this.env.HOST_PROBE?.saveEnrollmentHost(host).catch(() => false);
     if (!saved) return null;
-    await this.ctx.storage.put<Host>('onboarding-host', host);
-    return this.start(id, true);
+    const reviewJobId = await this.ctx.storage.transaction(async tx => {
+      const current = await tx.get<Pairing>(slot);
+      if (current?.id !== id || current.fingerprint !== pair.fingerprint) return null;
+      await tx.put<Host>('onboarding-host:' + host.address, host);
+      const jobId = current.reviewJobId ?? id;
+      const job = await tx.get<Job>('job:' + jobId);
+      if (!job || job.approved_at || job.expires_at > Date.now()) return jobId;
+      const replacement = crypto.randomUUID();
+      await tx.put<Pairing>(slot, { ...current, reviewJobId: replacement });
+      return replacement;
+    });
+    return reviewJobId ? this.start(reviewJobId, true, host.address) : null;
   }
 
-  async start(jobId: string, enrollment = false) {
+  async start(jobId: string, enrollment = false, address?: string) {
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
     if (!credential) return { state: 'enrollment_required', ...empty };
     const key = 'job:' + jobId;
-    const host = enrollment ? await this.ctx.storage.get<Host>('onboarding-host') : undefined;
+    if (address && !validTailnetIpv4(address)) return { state: 'host_setup_required', ...empty };
+    let host: Host | undefined;
+    if (enrollment) {
+      const legacy = await this.ctx.storage.get<Host>('onboarding-host');
+      const hosts = address ? undefined : await this.ctx.storage.list<Host>({ prefix: 'onboarding-host:', limit: 2 });
+      if (hosts?.size === 2 || (hosts?.size === 1 && legacy && !hosts.has('onboarding-host:' + legacy.address))) {
+        return { state: 'host_selection_required', ...empty };
+      }
+      host = address ? await this.ctx.storage.get<Host>('onboarding-host:' + address) ??
+        (legacy?.address === address ? legacy : undefined) : hosts?.values().next().value ?? legacy;
+    }
     if (enrollment && !host) return { state: 'host_setup_required', ...empty };
     const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint } : diagnostic;
     const options = await generateAuthenticationOptions({
@@ -183,7 +219,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
     const matches = await this.ctx.storage.transaction(async tx => {
       const existing = await tx.get<Job>(key);
-      if (existing) return existing.target.operation === target.operation;
+      if (existing) return existing.target.operation === target.operation &&
+        existing.target.host === target.host && (target.dry_run || (!existing.target.dry_run &&
+          existing.target.fingerprint === target.fingerprint));
       await tx.put<Job>(key, { target, options, expires_at: Date.now() + this.#jobLifetime() });
       return true;
     });
@@ -212,10 +250,28 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     };
   }
 
-  async hostStatus() {
-    const latest = await this.ctx.storage.get<string>('last-completed-host-check');
+  async listHosts() {
+    const hosts = await this.ctx.storage.list<Host>({ prefix: 'onboarding-host:' });
+    const legacy = await this.ctx.storage.get<Host>('onboarding-host');
+    if (legacy && !hosts.has('onboarding-host:' + legacy.address)) {
+      hosts.set('onboarding-host:' + legacy.address, legacy);
+    }
+    return { hosts: [...hosts.values()].map(({ address }) => ({ address })), ...empty };
+  }
+
+  async hostStatus(address?: string) {
+    if (address && !validTailnetIpv4(address)) return { state: 'host_setup_required', ...empty };
+    const latest = await this.ctx.storage.get<string>(address ? 'last-completed-host-check:' + address : 'last-completed-host-check');
     if (latest) return this.status(latest);
-    return { host: hostCheck.host, state: this.env.HOST_PROBE ? 'awaiting_check' : 'unconfigured', ...empty };
+    if (address) {
+      const host = await this.ctx.storage.get<Host>('onboarding-host:' + address);
+      const legacy = await this.ctx.storage.get<Host>('onboarding-host');
+      if (!host && legacy?.address !== address) return { state: 'host_setup_required', ...empty };
+      const previous = await this.ctx.storage.get<string>('last-completed-host-check');
+      const result = previous ? await this.status(previous) : undefined;
+      if (result && 'host' in result && result.host === address) return result;
+    }
+    return { host: address ?? hostCheck.host, state: this.env.HOST_PROBE ? 'awaiting_check' : 'unconfigured', ...empty };
   }
 
   async reviewOptions(jobId: string) {
@@ -246,22 +302,29 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       await tx.put<Job>(key, { ...current, approved_at: Date.now(), execution_owner: this.#executionOwner });
       return true;
     });
-    if (accepted && job.target.operation === hostCheck.operation) this.ctx.waitUntil(this.#verifyHost(key));
+    if (accepted && !job.target.dry_run) {
+      const expected = { address: job.target.host, fingerprint: job.target.fingerprint };
+      this.ctx.waitUntil(this.#verifyHost(key, expected));
+    }
     return accepted;
   }
 
-  async #verifyHost(key: string) {
-    const result: HostResult = this.env.HOST_PROBE
-      ? await this.env.HOST_PROBE.runHostEnrollmentCheck().catch(() => ({ state: 'check_outcome_unknown', executed: null }))
-      : { state: 'unconfigured', executed: false };
+  async #verifyHost(key: string, expected: Host) {
+    let result: HostResult = { state: 'unconfigured', executed: false };
+    if (this.env.HOST_PROBE && validEnrollmentHost(expected)) {
+      result = await this.env.HOST_PROBE.runHostEnrollmentCheck(expected)
+        .catch(() => ({ state: 'check_outcome_unknown', executed: null }));
+    }
     await this.ctx.storage.transaction(async tx => {
       const job = await tx.get<Job>(key);
       if (!job?.approved_at) return;
       await tx.put<Job>(key, { ...job, host_result: result });
-      const previous = await tx.get<string>('last-completed-host-check');
-      const previousJob = previous ? await tx.get<Job>('job:' + previous) : undefined;
-      if (!previousJob?.approved_at || previousJob.approved_at <= job.approved_at) {
-        await tx.put('last-completed-host-check', key.slice('job:'.length));
+      for (const slot of ['last-completed-host-check', 'last-completed-host-check:' + expected.address]) {
+        const previous = await tx.get<string>(slot);
+        const previousJob = previous ? await tx.get<Job>('job:' + previous) : undefined;
+        if (!previousJob?.approved_at || previousJob.approved_at <= job.approved_at) {
+          await tx.put(slot, key.slice('job:'.length));
+        }
       }
     });
   }
@@ -301,7 +364,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (!auth.startsWith('Bearer ') || Number(length) > 1024 ||
         mediaType !== 'application/x-www-form-urlencoded') return reject(403);
     const form = new URLSearchParams(await request.text());
-    return await store.receiveFingerprint(auth.slice(7), form.get('fingerprint'))
+    return await store.receiveFingerprint(url.searchParams.get('pair'), auth.slice(7), form.get('fingerprint'))
       ? new Response('Host fingerprint received.\n', { headers }) : reject(403);
   }
   if (request.headers.get('Origin') !== origin.origin) return reject(403);
@@ -319,6 +382,9 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/prepare-host') {
     const setup = await store.prepareHost(body.token);
     return setup ? reply(setup) : reject(403);
+  }
+  if (path === '/start-device-login') {
+    return await store.startDeviceLogin(body.token) ? reply({ started: true }) : reject(403);
   }
   if (path === '/configure-tailnet') {
     const connected = await store.configureTailnet(body.token, body.clientId, body.clientSecret);

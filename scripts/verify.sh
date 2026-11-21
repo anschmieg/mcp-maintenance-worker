@@ -38,7 +38,7 @@ start_worker() {
   node node_modules/wrangler/bin/wrangler.js dev --config "$config" --config wrangler.test-probe.jsonc --port 8795 --persist-to "$scratch/state" --var "MCP_BEARER_TOKEN:$MCP_BEARER_TOKEN" --var "PASSKEY_SETUP_TOKEN:$PASSKEY_SETUP_TOKEN" --var "PASSKEY_ORIGIN:$PASSKEY_ORIGIN" --var PASSKEY_LOCAL_TEST_JOB_TTL_MS:3000 > "$scratch/worker.log" 2>&1 &
   worker_pid=$!
   for _ in {1..30}; do
-    if curl -s -o /dev/null "$TEST_MCP_URL"; then return; fi
+    if curl --max-time 2 -s -o /dev/null "$TEST_MCP_URL"; then return; fi
     if ! kill -0 "$worker_pid" 2>/dev/null; then break; fi
     sleep 1
   done

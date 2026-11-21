@@ -113,3 +113,7 @@ export function validTailnetIpv4(address: string) {
 export function validEnrollmentHost(host: Host) {
   return validTailnetIpv4(host.address) && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
 }
+
+export function sameEnrollmentHost(current: Host | undefined, expected: Host) {
+  return current?.address === expected.address && current.fingerprint === expected.fingerprint;
+}

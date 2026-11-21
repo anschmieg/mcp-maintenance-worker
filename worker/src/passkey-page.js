@@ -32,44 +32,66 @@ function bind(label, run, failure) {
 
 function hostSetup(token) {
   title.textContent = 'Connect Tailscale';
-  details.textContent = 'The Worker will join with the dedicated identity configured by your Tailscale administrator.';
+  details.textContent = 'Sign in to add the Worker as a device on your tailnet. It inherits the network access your Tailscale policy gives devices signed in as you. SSH pairing is required separately.';
   setup.hidden = true;
   document.querySelector('#resume').hidden = true;
   tokenInput.value = '';
   const guide = document.querySelector('#tailnet-guide');
   const pendingDevice = document.querySelector('#pending-device');
   const policySnippet = document.querySelector('#tailnet-policy');
+  const taggedSetup = document.querySelector('#tagged-setup');
+  const login = document.querySelector('#device-login');
   const tag = 'tag:openbot-probe';
   policySnippet.value = JSON.stringify({ tagOwners: { [tag]: ['autogroup:admin'] } }, null, 2);
 
   async function connect() {
-    pendingDevice.hidden = true;
-    const result = await post('prepare-host', { token });
+    let result = await post('prepare-host', { token });
+    if (result.state === 'probe_unavailable') throw new Error('Probe unavailable');
     if (result.state === 'unconfigured') {
-      guide.hidden = false;
-      details.textContent = 'Set up one restricted Tailscale credential for this tailnet.';
-      bind('Connect with OAuth', async () => {
-        const clientId = document.querySelector('#oauth-id').value.trim();
-        const secret = document.querySelector('#oauth-secret');
-        const clientSecret = secret.value.trim();
-        secret.value = '';
-        await post('configure-tailnet', { token, clientId, clientSecret });
-        guide.hidden = true;
-        bind('Check Tailnet connection', connect, 'Could not check the connection. Try again.');
-        action.disabled = true;
+      taggedSetup.hidden = false;
+      taggedSetup.onclick = () => {
+        taggedSetup.hidden = true;
+        guide.hidden = false;
+        details.textContent = 'Set up one restricted Tailscale credential for this tailnet.';
+        bind('Connect with OAuth', async () => {
+          const clientId = document.querySelector('#oauth-id').value.trim();
+          const secret = document.querySelector('#oauth-secret');
+          const clientSecret = secret.value.trim();
+          secret.value = '';
+          await post('configure-tailnet', { token, clientId, clientSecret });
+          guide.hidden = true;
+          bind('Check Tailnet connection', connect, 'Could not check the connection. Try again.');
+          action.disabled = true;
+          await connect();
+        }, 'Could not use the Tailscale credential. Check that Auth Keys has Write permission for tag:openbot-probe and try again.');
+      };
+      bind('Sign in to Tailscale', async () => {
+        await post('start-device-login', { token });
         await connect();
-      }, 'Could not use the Tailscale credential. Check that Auth Keys has Write permission for tag:openbot-probe and try again.');
+      }, 'Could not start Tailscale sign-in. Try again.');
       return;
+    }
+    taggedSetup.hidden = true;
+    guide.hidden = true;
+    for (let attempt = 0; result.state === 'tailnet_pending' && attempt < 60; attempt++) {
+      details.textContent = result.needsDeviceApproval
+        ? 'Your tailnet requires device approval. Approve openbot-tailnet-ssh-probe in Tailscale Machines.'
+        : result.loginUrl ? 'Open Tailscale to complete sign-in. This page will continue when the device joins.'
+          : result.deviceTag ? 'Waiting for the tagged device. If device approval is required, approve it in Tailscale Machines.'
+            : 'Waiting for Tailscale to connect…';
+      login.hidden = !result.loginUrl;
+      if (result.loginUrl) login.href = result.loginUrl;
+      pendingDevice.hidden = !result.needsDeviceApproval && !result.deviceTag;
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      result = await post('prepare-host', { token });
     }
     if (result.state !== 'connected') {
-      details.textContent = 'The Tailnet connection is pending. If your tailnet requires device approval, open Tailscale Machines and approve openbot-tailnet-ssh-probe. Then check the connection again.';
-      guide.hidden = true;
-      pendingDevice.hidden = false;
-      bind('Check Tailnet connection', connect, 'Could not check the connection. Try again.');
-      action.disabled = false;
+      bind('Check Tailscale connection', connect, 'Could not check the connection. Try again.');
       return;
     }
-    title.textContent = 'Add the pilot host';
+    login.hidden = true;
+    pendingDevice.hidden = true;
+    title.textContent = 'Add a pilot host';
     details.textContent = 'Choose the host you want to enroll.';
     const command = document.querySelector('#install-command');
     const address = document.querySelector('#address');
@@ -77,7 +99,7 @@ function hostSetup(token) {
     for (const device of result.devices ?? []) {
       const option = document.createElement('option');
       option.value = device.address;
-      option.textContent = device.name + ' · ' + device.address;
+      option.textContent = device.name;
       picker.append(option);
     }
     document.querySelector('#device-picker').hidden = !result.devices?.length;
@@ -133,7 +155,13 @@ function hostSetup(token) {
       throw new Error('Pairing expired');
     }, 'Host setup did not complete. Reload the page to retry.');
   }
-  bind('Connect Tailscale', connect, 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.');
+  const failure = 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.';
+  action.textContent = 'Checking Tailscale connection…';
+  action.disabled = true;
+  void connect().catch(() => {
+    status.textContent = failure;
+    bind('Check Tailscale connection', connect, failure);
+  });
 }
 
 if (location.pathname.endsWith('/onboard')) {

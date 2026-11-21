@@ -18,7 +18,9 @@ function generate(name) {
 }
 const host = generate('ssh-host');
 const client = await generateSshKey();
-const clientPublic = ssh2.utils.parseKey(client.publicKey);
+const alternateClient = await generateSshKey();
+const clientKeys = new Map([['100.64.0.2', client], ['100.64.0.3', alternateClient]]);
+const clientPublicKeys = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey));
 const installCommand = hostInstallCommand(client.publicKey);
 const forcedLine = installCommand.split('\n').find(line => line.includes('restrict,command='));
 assert.match(forcedLine, /restrict,command=/);
@@ -63,14 +65,16 @@ const devices = await listTailnetDevices({
 assert.deepEqual(devices, [{ name: 'Example host', address: '100.64.0.2' }]);
 let mode = 'normal';
 let attempts = 0;
-let enrolled;
+const enrolled = new Map();
 let tailnetConfigured = false;
+let deviceLogin = false;
 
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
   connection.on('authentication', auth => {
-    if (auth.username !== 'openbot-tailnet-probe' || auth.method !== 'publickey' ||
-        !auth.key.data.equals(clientPublic.getPublicSSH())) return auth.reject();
+    if (auth.username !== 'openbot-tailnet-probe' || auth.method !== 'publickey') return auth.reject();
+    const clientPublic = clientPublicKeys.find(key => auth.key.data.equals(key.getPublicSSH()));
+    if (!clientPublic) return auth.reject();
     if (auth.signature && clientPublic.verify(auth.blob, auth.signature, auth.hashAlgo) !== true) {
       return auth.reject();
     }
@@ -90,15 +94,31 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
 });
 await new Promise(resolve => ssh.listen(0, '127.0.0.1', resolve));
 createServer((request, response) => {
-  if (request.url === '/fixture') {
-    const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : enrolled?.fingerprint;
+  const url = new URL(request.url, 'http://localhost');
+  const address = url.searchParams.get('address');
+  const clientKey = clientKeys.get(address);
+  if (url.pathname === '/install') {
+    response.end(JSON.stringify(clientKey ? hostInstallCommand(clientKey.publicKey) : null));
+  } else if (url.pathname === '/fixture') {
+    const target = enrolled.get(address);
+    const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : target?.fingerprint;
     response.setHeader('X-Fixture-Mode', mode);
     response.end(JSON.stringify({
-      port: ssh.address().port, fingerprint, privateKey: client.privateKey, interrupt: mode === 'interrupted',
+      host: mode === 'changed-target' ? { ...target, address: '100.64.0.3' } : target,
+      port: ssh.address().port, fingerprint, privateKey: clientKey?.privateKey, interrupt: mode === 'interrupted',
     }));
+  } else if (request.url === '/start-device-login' && request.method === 'POST') {
+    deviceLogin = !tailnetConfigured;
+    response.end(JSON.stringify(deviceLogin));
+  } else if (request.url === '/prepare' && deviceLogin) {
+    const state = mode === 'device-approval'
+      ? { state: 'tailnet_pending', needsDeviceApproval: true }
+      : mode === 'device-connected' ? { state: 'connected', devices }
+        : { state: 'tailnet_pending', loginUrl: 'https://login.tailscale.com/a/example' };
+    response.end(JSON.stringify(state));
   } else if (request.url === '/prepare') {
     response.end(JSON.stringify(tailnetConfigured
-      ? { state: 'connected', installCommand, deviceTag: 'tag:openbot-probe', devices }
+      ? { state: 'connected', deviceTag: 'tag:openbot-probe', devices }
       : { state: 'unconfigured' }));
   } else if (request.url === '/oauth' && request.method === 'POST') {
     let body = '';
@@ -114,13 +134,14 @@ createServer((request, response) => {
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       const host = JSON.parse(body);
-      const saved = validEnrollmentHost(host) &&
-        (!enrolled || (enrolled.address === host.address && enrolled.fingerprint === host.fingerprint));
-      if (saved) enrolled = host;
+      const previous = enrolled.get(host.address);
+      const saved = validEnrollmentHost(host) && (!previous || previous.fingerprint === host.fingerprint);
+      if (saved) enrolled.set(host.address, host);
       response.end(JSON.stringify(saved));
     });
   } else if (request.method === 'POST' && request.url.startsWith('/mode/')) {
     mode = request.url.slice('/mode/'.length);
+    if (mode === 'reset-device-login') deviceLogin = false;
     response.end();
   } else {
     response.end(JSON.stringify({ attempts, pinned }));

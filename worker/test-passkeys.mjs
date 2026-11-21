@@ -17,13 +17,13 @@ async function post(path, body, requestOrigin = origin) {
   });
 }
 
-async function call(name, job_id) {
+async function call(name, job_id, host) {
   const client = new Client({ name: 'passkey-integration-test', version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
       requestInit: { headers: { Authorization: 'Bearer ' + mcpToken } },
     }), { timeout: 8000 });
-    const result = await client.callTool({ name, arguments: job_id ? { job_id } : {} });
+    const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}) } });
     assert.ok(!result.isError, JSON.stringify(result));
     assert.ok([false, true, null].includes(result.structuredContent.executed));
     return result.structuredContent;
@@ -38,7 +38,7 @@ if (process.argv[3] === 'after-restart') {
   const status = await call('passkey_test_status', hostJob);
   assert.equal(status.state, 'check_outcome_unknown');
   assert.equal(status.executed, null);
-  assert.deepEqual(await call('start_host_enrollment', hostJob), status);
+  assert.deepEqual(await call('start_host_enrollment', hostJob, status.host), status);
   assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 409);
   assert.equal(await attempts(), count);
   console.log('PASS: Worker restart preserved the consumed approval without repeating SSH');
@@ -85,6 +85,24 @@ assert.equal((await post('enroll', { token: setupToken, response: registration }
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
 assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), { state: 'unconfigured' });
+assert.equal((await post('start-device-login', { token: mcpToken })).status, 403);
+assert.equal((await post('start-device-login', { token: setupToken }, 'https://other.example')).status, 403);
+assert.deepEqual(await (await post('start-device-login', { token: setupToken })).json(), { started: true });
+assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), {
+  state: 'tailnet_pending', loginUrl: 'https://login.tailscale.com/a/example',
+});
+assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
+assert.equal((await post('begin-host-pairing', { token: setupToken, address: '100.64.0.2' })).status, 403);
+await fetch(fixture + '/mode/device-approval', { method: 'POST' });
+assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), {
+  state: 'tailnet_pending', needsDeviceApproval: true,
+});
+await fetch(fixture + '/mode/device-connected', { method: 'POST' });
+const browserJoin = await (await post('prepare-host', { token: setupToken })).json();
+assert.equal(browserJoin.state, 'connected');
+assert.equal(browserJoin.loginUrl, undefined);
+assert.deepEqual(browserJoin.devices, [{ name: 'Example host', address: '100.64.0.2' }]);
+await fetch(fixture + '/mode/reset-device-login', { method: 'POST' });
 const oauth = { clientId: 'test-id', clientSecret: 'example-oauth-secret' };
 assert.equal((await post('configure-tailnet', { ...oauth, token: mcpToken })).status, 403);
 assert.equal((await post('configure-tailnet', { ...oauth, token: setupToken }, 'https://other.example')).status, 403);
@@ -93,11 +111,9 @@ assert.equal((await post('configure-tailnet', {
 })).status, 403);
 assert.deepEqual(await (await post('configure-tailnet', { ...oauth, token: setupToken })).json(), { configured: true });
 const setupResult = await (await post('prepare-host', { token: setupToken })).json();
-assert.deepEqual(Object.keys(setupResult).sort(), ['deviceTag', 'devices', 'installCommand', 'state']);
+assert.deepEqual(Object.keys(setupResult).sort(), ['deviceTag', 'devices', 'state']);
 assert.equal(setupResult.deviceTag, 'tag:openbot-probe');
 assert.equal(setupResult.state, 'connected');
-assert.match(setupResult.installCommand, /restrict,command=/);
-assert.doesNotMatch(setupResult.installCommand, /PRIVATE KEY|tskey-auth-/u);
 assert.deepEqual(setupResult.devices, [{ name: 'Example host', address: '100.64.0.2' }]);
 const address = setupResult.devices[0].address;
 const { pinned: hostPin } = await (await fetch(fixture + '/attempts')).json();
@@ -107,8 +123,8 @@ const pair = await (await post('begin-host-pairing', { token: setupToken, addres
 assert.match(pair.installCommand, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
 execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
 const callbackToken = pair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
-function hostCallback(token, fingerprint) {
-  return fetch(origin + '/passkeys/host-pairing', {
+function hostCallback(token, fingerprint, pairing = pair.id) {
+  return fetch(origin + '/passkeys/host-pairing?pair=' + pairing, {
     method: 'POST', headers: { Authorization: 'Bearer ' + token },
     body: new URLSearchParams({ fingerprint }),
   });
@@ -125,7 +141,6 @@ assert.equal(hostSetup.state, 'pending');
 assert.equal(hostSetup.host, address);
 assert.equal(hostSetup.fingerprint, hostPin);
 assert.equal(hostSetup.executed, false);
-assert.equal((await post('begin-host-pairing', { token: setupToken, address: '100.64.0.3' })).status, 403);
 assert.equal(await attempts(), 0);
 console.log('PASS: owner device picker and one-time host callback pin the selected host before review');
 
@@ -166,6 +181,7 @@ assert.equal((await call('start_host_enrollment', job)).state, 'job_id_in_use');
 for (const [mode, state, executed, count] of [
   ['normal', 'verified', true, 1],
   ['wrong-pin', 'host_key_unverified', false, 1],
+  ['changed-target', 'target_changed', false, 1],
   ['wrong-response', 'diagnostic_failed', null, 2],
   ['interrupted', 'check_outcome_unknown', null, 3],
 ]) {
@@ -175,7 +191,7 @@ for (const [mode, state, executed, count] of [
   assert.equal(hostRequest.operation, 'run openbot-enrollment-check-v1 to verify SSH enrollment');
   assert.equal(hostRequest.state, 'pending');
   assert.equal(hostRequest.executed, false);
-  assert.equal(await attempts(), count - (mode === 'wrong-pin' ? 0 : 1));
+  assert.equal(await attempts(), count - (mode === 'wrong-pin' || mode === 'changed-target' ? 0 : 1));
   assert.equal((await post('approve', { job: hostJob, response })).status, 409);
   const hostReview = await (await post('review-options', { job: hostJob })).json();
   const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
@@ -209,15 +225,54 @@ await new Promise(resolve => setTimeout(resolve, Math.max(0, expiring.expires_at
 assert.equal((await post('approve', { job: expiredJob, response: expiredAssertion })).status, 409);
 assert.equal((await call('passkey_test_status', expiredJob)).state, 'expired');
 assert.equal(await attempts(), beforeExpiry);
+const [resumed, repeatedResume] = await Promise.all([
+  post('finish-host-pairing', { token: setupToken, id: pair.id }).then(result => result.json()),
+  post('finish-host-pairing', { token: setupToken, id: pair.id }).then(result => result.json()),
+]);
+assert.equal(resumed.state, 'pending');
+assert.notEqual(resumed.job_id, hostSetup.job_id);
+assert.equal(resumed.job_id, repeatedResume.job_id);
+assert.equal(await attempts(), beforeExpiry);
 console.log('PASS: expired approval did not open SSH');
+
+await fetch(fixture + '/mode/normal', { method: 'POST' });
+const alternateAddress = '100.64.0.3';
+const alternatePair = await (await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).json();
+assert.notEqual(alternatePair.id, pair.id);
+const installedPublicKey = command => command.match(/ssh-ed25519 [A-Za-z0-9+/]+/u)[0];
+assert.notEqual(installedPublicKey(alternatePair.installCommand), installedPublicKey(pair.installCommand));
+const alternateToken = alternatePair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+assert.equal((await hostCallback(alternateToken, hostPin, pair.id)).status, 403);
+assert.equal((await hostCallback(alternateToken, hostPin, alternatePair.id)).status, 200);
+const alternateSetup = await (await post('finish-host-pairing', { token: setupToken, id: alternatePair.id })).json();
+assert.equal(alternateSetup.host, alternateAddress);
+assert.deepEqual((await call('maintenance_hosts')).hosts, [{ address }, { address: alternateAddress }]);
+assert.equal((await call('start_host_enrollment', randomUUID())).state, 'host_selection_required');
+const alternateJob = randomUUID();
+assert.equal((await call('start_host_enrollment', alternateJob, alternateAddress)).host, alternateAddress);
+assert.equal((await call('start_host_enrollment', alternateJob, address)).state, 'job_id_in_use');
+const alternateReview = await (await post('review-options', { job: alternateJob })).json();
+assert.equal((await post('approve', {
+  job: alternateJob, response: assertion(0x05, origin, alternateReview.options.challenge),
+})).status, 200);
+for (let retry = 0; retry < 60; retry++) {
+  const current = await call('passkey_test_status', alternateJob);
+  if (current.state === 'verified') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal((await call('passkey_test_status', alternateJob)).state, 'verified');
+assert.equal((await call('maintenance_host_status', undefined, alternateAddress)).job_id, alternateJob);
+assert.equal((await call('maintenance_host_status', undefined, address)).host, address);
+assert.equal(await attempts(), beforeExpiry + 1);
+console.log('PASS: two host targets use distinct client keys and isolated pairing and job IDs');
 
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
-await call('start_host_enrollment', hostJob);
+await call('start_host_enrollment', hostJob, address);
 const hostReview = await (await post('review-options', { job: hostJob })).json();
 const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
 assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 200);
-const count = beforeExpiry + 1;
+const count = beforeExpiry + 2;
 for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
   await new Promise(resolve => setTimeout(resolve, 100));
 }

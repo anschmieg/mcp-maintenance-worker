@@ -47,13 +47,17 @@ export class MaintenanceAgent extends McpAgent<Env> {
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
       this.server.registerTool('start_host_enrollment', {
-        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic. Show the owner the review URL.',
-        inputSchema: jobSchema,
-      }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id, true)));
+        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. Show the owner the review URL.',
+        inputSchema: { ...jobSchema, host: z.string().optional() },
+      }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
       this.server.registerTool('maintenance_host_status', {
-        description: 'Read the last completed check for the enrolled SSH host.',
+        description: 'Read the last completed SSH enrollment check, optionally for a specific enrolled host.',
+        inputSchema: { host: z.string().optional() },
+      }, async ({ host }) => result(await approvalStore(this.env).hostStatus(host)));
+      this.server.registerTool('maintenance_hosts', {
+        description: 'List enrolled host addresses for selecting an SSH enrollment check target.',
         inputSchema: {},
-      }, async () => result(await approvalStore(this.env).hostStatus()));
+      }, async () => result(await approvalStore(this.env).listHosts()));
     }
     this.server.registerTool('start_timing_probe',{
       description:'Schedule a no-op reliability probe. Use a fresh random UUID and reuse it if the call times out. No command is run.',
