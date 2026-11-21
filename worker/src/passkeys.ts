@@ -8,6 +8,7 @@ import {
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
 import approvalStyles from './passkey-page.css';
+import pairingInstaller from './pairing-install.sh';
 import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
@@ -232,51 +233,14 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (!install) return null;
     const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
-    const callback = 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + token);
     return [
       '#!/bin/sh',
-      'cancel_pairing() {',
-      '  ' + callback + ' --data-urlencode "account_action=canceled" ' + shellQuote(url.href),
-      '}',
-      'pair_host() {',
-      '  PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin; export PATH',
-      '  if [ "$(uname -s)" != Linux ]; then',
-      "    echo 'Run this command on the selected Linux host, in its terminal or over SSH.' >&2; return 1",
-      '  fi',
-      '  if [ "$(id -u)" != 0 ]; then',
-      "    echo 'Administrator permission is required. Copy the complete command from setup.' >&2; return 1",
-      '  fi',
-      '  if ! tailscale ip -4 | grep -Fxq -- ' + shellQuote(pair.address) + '; then',
-      "    echo 'This machine is not the selected Tailscale host. Run the command on the selected machine.' >&2; return 1",
-      '  fi',
-      '  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk \'{print $2}\')',
-      '  case "$fingerprint" in SHA256:*) ;; *)',
-      "    echo 'No SSH host key found. Enable OpenSSH Server on this machine, then run the command again.' >&2; return 1;;",
-      '  esac',
-      '  account=' + shellQuote(account),
-      '  if ! (true </dev/tty) 2>/dev/null; then',
-      "    echo 'Run the installer in an interactive terminal on the selected host.' >&2; return 1",
-      '  fi',
-      '  if account_uid=$(id -u "$account" 2>/dev/null); then',
-      '    if [ "$account_uid" = 0 ]; then',
-      "      echo 'The dedicated account must be unprivileged.' >&2; return 1",
-      '    fi',
-      '    printf "1) Use the existing %s account and install its restricted key\n2) Cancel\nChoice [2]: " "$account" >/dev/tty',
-      '    IFS= read -r answer </dev/tty || return 1',
-      '    if [ "$answer" != 1 ]; then cancel_pairing; return 1; fi',
-      '    account_action=reused',
-      '  else',
-      '    printf "1) Create the dedicated %s account and install its restricted key\n2) Cancel\nChoice [2]: " "$account" >/dev/tty',
-      '    IFS= read -r answer </dev/tty || return 1',
-      '    if [ "$answer" != 1 ]; then cancel_pairing; return 1; fi',
-      '    useradd --system --create-home --home-dir /var/lib/"$account" --shell /bin/sh "$account" || return 1',
-      '    account_action=created',
-      '  fi',
-      '  runuser -u "$account" -- /bin/sh -c ' + shellQuote(install) + ' &&',
-      '  ' + callback + ' --data-urlencode "fingerprint=$fingerprint" --data-urlencode "account_action=$account_action" ' + shellQuote(url.href),
-      '}',
-      'pair_host',
-      '',
+      'target_address=' + shellQuote(pair.address),
+      'account=' + shellQuote(account),
+      'pairing_token=' + shellQuote(token),
+      'callback_url=' + shellQuote(url.href),
+      'install_command=' + shellQuote(install),
+      pairingInstaller,
     ].join('\n');
   }
 
