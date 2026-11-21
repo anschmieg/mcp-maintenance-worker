@@ -5,8 +5,10 @@ import './wasm_exec.js';
 import module from './screen.wasm';
 import { assessCommand } from './assessment';
 import { TimingProbe } from './timing';
+import { approvalStore, passkeyOrigin, passkeyRoute, type PasskeyEnv } from './passkeys';
 export { TimingProbe };
-type Env = { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe>; AI?: Parameters<typeof assessCommand>[0] };
+export { PasskeyApproval } from './passkeys';
+type Env = PasskeyEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe>; AI?: Parameters<typeof assessCommand>[0] };
 
 let ready: Promise<void> | undefined;
 const g = globalThis as typeof globalThis & {
@@ -31,6 +33,28 @@ export class MaintenanceAgent extends McpAgent<Env> {
   async init() {
     const probe_id=z.string().uuid();
     const output=(probe:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(probe)}],structuredContent:{probe,executed:false}});
+    if (passkeyOrigin(this.env)) {
+      const jobSchema = { job_id: z.string().uuid().toLowerCase() };
+      const result = (job: Record<string, unknown>) => ({
+        content: [{ type: 'text' as const, text: JSON.stringify(job) }], structuredContent: job,
+      });
+      this.server.registerTool('start_passkey_test', {
+        description: 'Create a dry-run approval for a fixed enrollment diagnostic. Show the owner the review URL. No host action runs.',
+        inputSchema: jobSchema,
+      }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id)));
+      this.server.registerTool('passkey_test_status', {
+        description: 'Read a passkey dry run or host enrollment check by its original job UUID.',
+        inputSchema: jobSchema,
+      }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
+      this.server.registerTool('start_host_enrollment', {
+        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic. Show the owner the review URL.',
+        inputSchema: jobSchema,
+      }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id, true)));
+      this.server.registerTool('maintenance_host_status', {
+        description: 'Read the last completed enrollment check for ams.',
+        inputSchema: {},
+      }, async () => result(await approvalStore(this.env).hostStatus()));
+    }
     this.server.registerTool('start_timing_probe',{
       description:'Schedule a no-op reliability probe. Use a fresh random UUID and reuse it if the call times out. No command is run.',
       inputSchema:{probe_id,delay_seconds:z.number().int().min(5).max(300)},
@@ -69,6 +93,10 @@ const transport=MaintenanceAgent.serve('/mcp');
 export default {
   async fetch(request:Request, env:Env, ctx:ExecutionContext) {
     const token=env.MCP_BEARER_TOKEN;
+    if (new URL(request.url).pathname.startsWith('/passkeys/')) {
+      if (env.PASSKEY_SETUP_TOKEN && env.PASSKEY_SETUP_TOKEN === token) return new Response(null, { status: 503 });
+      return passkeyRoute(request, env);
+    }
     if (!token || token.length<32) return new Response('PoC token not configured',{status:503});
     const auth=request.headers.get('Authorization');
     if (!auth || !auth.startsWith('Bearer ') || auth.length!==token.length+7) return new Response('Unauthorized',{status:401});

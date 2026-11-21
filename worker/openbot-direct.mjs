@@ -29,4 +29,20 @@ server.registerTool('screen_maintenance_command', {
     return { ...result, content: [...result.content, { type: 'text', text: detail }] };
   } finally { await client.close(); }
 });
+for (const [name, description, inputSchema = { job_id: z.string().uuid() }] of [
+  ['start_passkey_test', 'Start a fixed dry-run approval. Present the returned review URL to the owner. No host action runs.'],
+  ['passkey_test_status', 'Check a passkey dry run or host enrollment using its original job UUID.'],
+  ['start_host_enrollment', 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic. Present the review URL to the owner.'],
+  ['maintenance_host_status', 'Read the last completed enrollment check for ams.', {}],
+]) {
+  server.registerTool(name, { description, inputSchema }, async (args, extra) => {
+    const client = new Client({ name: 'openbot-direct-mcp-adapter', version: '0.1.0' });
+    try {
+      await client.connect(new StreamableHTTPClientTransport(endpoint, {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }), { timeout: 8000, signal: extra.signal });
+      return await client.callTool({ name, arguments: args }, undefined, { timeout: 8000, signal: extra.signal });
+    } finally { await client.close(); }
+  });
+}
 await server.connect(new StdioServerTransport());

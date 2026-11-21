@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# This entry point is invoked by OpenSSH as a forced command.
+if [ "${SSH_ORIGINAL_COMMAND-}" != openbot-enrollment-check-v1 ]; then
+    printf '%s\n' 'Only openbot-enrollment-check-v1 is permitted' >&2
+    exit 126
+fi
+
+printf '%s\n' 'openbot-host-ready-v1'

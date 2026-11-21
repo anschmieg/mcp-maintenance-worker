@@ -7,6 +7,6 @@
   "workers_dev": false,
   "preview_urls": false,
   "ai": {"binding": "AI"},
-  "durable_objects": {"bindings":[{"name":"MCP_OBJECT","class_name":"MaintenanceAgent"},{"name":"PROBES","class_name":"TimingProbe"}]},
-  "migrations":[{"tag":"v1","new_sqlite_classes":["MaintenanceAgent"]},{"tag":"v2","new_sqlite_classes":["TimingProbe"]}]
+  "durable_objects": {"bindings":[{"name":"MCP_OBJECT","class_name":"MaintenanceAgent"},{"name":"PROBES","class_name":"TimingProbe"},{"name":"PASSKEYS","class_name":"PasskeyApproval"}]},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["MaintenanceAgent"]},{"tag":"v2","new_sqlite_classes":["TimingProbe"]},{"tag":"v3","new_sqlite_classes":["PasskeyApproval"]}]
 }

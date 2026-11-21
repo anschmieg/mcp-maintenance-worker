@@ -1,5 +1,16 @@
 import { TailnetObject } from './src/index.js';
-import { SshClient } from '@workeryard/undershell';
+import { runEnrollmentCheck, withSsh } from './ssh-check';
+import { WorkerEntrypoint } from 'cloudflare:workers';
+
+export class HostVerifier extends WorkerEntrypoint {
+  async runAmsEnrollmentCheck() {
+    if (!this.env.TS_AUTHKEY || !this.env.PROBE_SSH_KEY || !this.env.PROBE_TARGET ||
+        !/^SHA256:[A-Za-z0-9+/]{43}$/.test(this.env.PROBE_HOST_FINGERPRINT ?? '')) {
+      return { state: 'unconfigured', executed: false };
+    }
+    return this.env.NODE.getByName('ams-probe').runEnrollmentCheck();
+  }
+}
 
 export class ProbeNode extends TailnetObject {
   tailnetOptions() {
@@ -11,29 +22,17 @@ export class ProbeNode extends TailnetObject {
   }
 
   async probe() {
+    return withSsh(await this.#socket(), this.env, async () => ({ hostKeyVerified: true, authentication: 'authenticated', executed: false }));
+  }
+
+  async runEnrollmentCheck() {
+    return runEnrollmentCheck(await this.#socket(), this.env);
+  }
+
+  async #socket() {
     const tailnet = await this.tailnet();
     await tailnet.ready(8000);
-    const socket = await tailnet.connect(this.env.PROBE_TARGET);
-    let hostKeyVerified = false;
-    try {
-      const ssh = await SshClient.connect({
-        socket,
-        username: 'openbot-tailnet-probe',
-        auth: { kind: 'privateKey', privateKey: this.env.PROBE_SSH_KEY },
-        hostKeyFingerprint: this.env.PROBE_HOST_FINGERPRINT,
-        verifyHostKey() {
-          hostKeyVerified = true;
-          return true;
-        },
-        timeoutMs: 5000,
-      });
-      await ssh.close();
-      return { hostKeyVerified, authentication: 'unexpectedly_accepted', executed: false };
-    } catch {
-      return { hostKeyVerified, authentication: 'not_accepted', executed: false };
-    } finally {
-      await socket.close().catch(() => {});
-    }
+    return tailnet.connect(this.env.PROBE_TARGET);
   }
 }
 

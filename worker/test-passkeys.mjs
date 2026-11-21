@@ -1,0 +1,178 @@
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
+import { encodeCBOR } from '@levischuck/tiny-cbor';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+const { PASSKEY_ORIGIN: origin, PASSKEY_SETUP_TOKEN: setupToken, MCP_BEARER_TOKEN: mcpToken } = process.env;
+assert.ok(origin && setupToken && mcpToken);
+const rpId = new URL(origin).hostname;
+
+async function post(path, body, requestOrigin = origin) {
+  return fetch(origin + '/passkeys/' + path, {
+    method: 'POST', headers: { Origin: requestOrigin, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+async function call(name, job_id) {
+  const client = new Client({ name: 'passkey-integration-test', version: '1' });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
+      requestInit: { headers: { Authorization: 'Bearer ' + mcpToken } },
+    }), { timeout: 8000 });
+    const result = await client.callTool({ name, arguments: job_id ? { job_id } : {} });
+    assert.ok(!result.isError, JSON.stringify(result));
+    assert.ok([false, true, null].includes(result.structuredContent.executed));
+    return result.structuredContent;
+  } finally { await client.close(); }
+}
+
+const fixture = 'http://127.0.0.1:8796';
+const attempts = async () => (await (await fetch(fixture + '/attempts')).json()).attempts;
+const receipt = process.argv[2];
+if (process.argv[3] === 'after-restart') {
+  const { hostJob, hostApproval, count } = JSON.parse(readFileSync(receipt, 'utf8'));
+  const status = await call('passkey_test_status', hostJob);
+  assert.equal(status.state, 'check_outcome_unknown');
+  assert.equal(status.executed, null);
+  assert.deepEqual(await call('start_host_enrollment', hostJob), status);
+  assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 409);
+  assert.equal(await attempts(), count);
+  console.log('PASS: Worker restart preserved the consumed approval without repeating SSH');
+  process.exit(0);
+}
+
+const job = randomUUID();
+assert.equal((await call('start_passkey_test', job)).state, 'enrollment_required');
+assert.equal((await post('enrollment-options', { token: mcpToken })).status, 403);
+assert.equal((await post('enrollment-options', { token: setupToken }, 'https://other.example')).status, 403);
+assert.equal((await fetch(origin + '/passkeys/onboard')).status, 200);
+assert.match(await (await fetch(origin + '/passkeys/browser.js')).text(), /startRegistration/);
+
+const hash = data => createHash('sha256').update(data).digest();
+const b64 = bytes => Buffer.from(bytes).toString('base64url');
+const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const { x, y } = publicKey.export({ format: 'jwk' });
+const cose = Buffer.from(encodeCBOR(new Map([
+  [1, 2], [3, -7], [-1, 1], [-2, Buffer.from(x, 'base64url')], [-3, Buffer.from(y, 'base64url')],
+])));
+const rawId = randomBytes(32);
+const id = b64(rawId);
+const identity = { id, rawId: id, type: 'public-key', clientExtensionResults: {} };
+const clientData = (type, challenge, requestOrigin = origin) =>
+  Buffer.from(JSON.stringify({ type, challenge, origin: requestOrigin }));
+const authenticatorData = (flags) => Buffer.concat([hash(rpId), Buffer.of(flags), Buffer.alloc(4)]);
+const setup = await post('enrollment-options', { token: setupToken });
+assert.equal(setup.status, 200);
+const enrollment = await setup.json();
+const attestation = encodeCBOR(new Map([
+  ['fmt', 'none'], ['attStmt', new Map()],
+  ['authData', Buffer.concat([authenticatorData(0x45), Buffer.alloc(16), Buffer.of(0, rawId.length), rawId, cose])],
+]));
+const registration = {
+  ...identity, response: {
+    clientDataJSON: b64(clientData('webauthn.create', enrollment.challenge)),
+    attestationObject: b64(attestation),
+  },
+};
+assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 200);
+assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
+assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
+
+const pending = await call('start_passkey_test', job);
+assert.equal(pending.state, 'pending');
+assert.equal((await fetch(pending.review_url)).status, 200);
+assert.equal((await call('passkey_test_status', job)).state, 'pending');
+const second = randomUUID();
+await call('start_passkey_test', second);
+const { options } = await (await post('review-options', { job })).json();
+assert.equal(options.userVerification, 'required');
+
+function assertion(flags, requestOrigin, challenge = options.challenge) {
+  const authData = authenticatorData(flags);
+  const data = clientData('webauthn.get', challenge, requestOrigin);
+  return { ...identity, response: {
+    authenticatorData: b64(authData),
+    clientDataJSON: b64(data),
+    signature: b64(sign('sha256', Buffer.concat([authData, hash(data)]), privateKey)),
+  } };
+}
+
+const response = assertion(0x05);
+assert.equal((await post('approve', { job, response: assertion(0x01) })).status, 409);
+assert.equal((await post('approve', { job, response: assertion(0x05, 'https://other.example') })).status, 409);
+assert.equal((await post('approve', { job: second, response })).status, 409);
+const repeated = await Promise.all([post('approve', { job, response }), post('approve', { job, response })]);
+assert.deepEqual(repeated.map(result => result.status).sort(), [200, 409]);
+const approved = await call('passkey_test_status', job);
+assert.equal(approved.state, 'verified_dry_run');
+assert.ok(approved.approved_at);
+assert.deepEqual(await call('start_passkey_test', job), approved);
+assert.equal((await call('passkey_test_status', second)).state, 'pending');
+console.log('PASS: passkey enrollment, origin and user verification, job binding, concurrent replay, and MCP reconnect');
+
+assert.equal((await call('maintenance_host_status')).state, 'awaiting_check');
+assert.equal((await call('start_host_enrollment', job)).state, 'job_id_in_use');
+for (const [mode, state, executed, count] of [
+  ['normal', 'verified', true, 1],
+  ['wrong-pin', 'host_key_unverified', false, 1],
+  ['wrong-response', 'diagnostic_failed', null, 2],
+  ['interrupted', 'check_outcome_unknown', null, 3],
+]) {
+  await fetch(fixture + '/mode/' + mode, { method: 'POST' });
+  const hostJob = randomUUID();
+  const hostRequest = await call('start_host_enrollment', hostJob);
+  assert.equal(hostRequest.operation, 'run openbot-enrollment-check-v1 to verify SSH enrollment');
+  assert.equal(hostRequest.state, 'pending');
+  assert.equal(hostRequest.executed, false);
+  assert.equal(await attempts(), count - (mode === 'wrong-pin' ? 0 : 1));
+  assert.equal((await post('approve', { job: hostJob, response })).status, 409);
+  const hostReview = await (await post('review-options', { job: hostJob })).json();
+  const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
+  const approval = await post('approve', { job: hostJob, response: hostApproval });
+  assert.equal(approval.status, 200);
+  assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 409);
+  let hostStatus;
+  for (let retry = 0; retry < 60; retry++) {
+    hostStatus = await call('passkey_test_status', hostJob);
+    if (hostStatus.state !== 'checking_host') break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(hostStatus.state, state);
+  assert.equal(hostStatus.executed, executed);
+  if (executed) {
+    assert.equal(hostStatus.stdout, 'openbot-host-ready-v1');
+    assert.equal(hostStatus.exit_status, 0);
+  }
+  assert.deepEqual(await call('maintenance_host_status'), hostStatus);
+  assert.deepEqual(await call('start_host_enrollment', hostJob), hostStatus);
+  assert.equal(await attempts(), count);
+  console.log('PASS: host enrollment ' + mode + ', status after reconnect, replay rejected');
+}
+
+const expiredJob = randomUUID();
+const expiring = await call('start_host_enrollment', expiredJob);
+const expiringReview = await (await post('review-options', { job: expiredJob })).json();
+const expiredAssertion = assertion(0x05, origin, expiringReview.options.challenge);
+const beforeExpiry = await attempts();
+await new Promise(resolve => setTimeout(resolve, Math.max(0, expiring.expires_at - Date.now() + 100)));
+assert.equal((await post('approve', { job: expiredJob, response: expiredAssertion })).status, 409);
+assert.equal((await call('passkey_test_status', expiredJob)).state, 'expired');
+assert.equal(await attempts(), beforeExpiry);
+console.log('PASS: expired approval did not open SSH');
+
+await fetch(fixture + '/mode/hang', { method: 'POST' });
+const hostJob = randomUUID();
+await call('start_host_enrollment', hostJob);
+const hostReview = await (await post('review-options', { job: hostJob })).json();
+const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
+assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 200);
+const count = beforeExpiry + 1;
+for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal(await attempts(), count);
+assert.equal((await call('passkey_test_status', hostJob)).state, 'checking_host');
+writeFileSync(receipt, JSON.stringify({ hostJob, hostApproval, count }), { mode: 0o600 });
