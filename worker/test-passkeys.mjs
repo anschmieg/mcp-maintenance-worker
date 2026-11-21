@@ -83,6 +83,14 @@ assert.equal((await post('enroll', { token: setupToken, response: registration }
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
+assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), { state: 'unconfigured' });
+const oauth = { clientId: 'test-id', clientSecret: 'example-oauth-secret' };
+assert.equal((await post('configure-tailnet', { ...oauth, token: mcpToken })).status, 403);
+assert.equal((await post('configure-tailnet', { ...oauth, token: setupToken }, 'https://other.example')).status, 403);
+assert.equal((await post('configure-tailnet', {
+  ...oauth, token: setupToken, clientSecret: 'wrong-example-secret',
+})).status, 403);
+assert.deepEqual(await (await post('configure-tailnet', { ...oauth, token: setupToken })).json(), { configured: true });
 const setupResult = await (await post('prepare-host', { token: setupToken })).json();
 assert.deepEqual(Object.keys(setupResult).sort(), ['installCommand', 'state']);
 assert.equal(setupResult.state, 'connected');

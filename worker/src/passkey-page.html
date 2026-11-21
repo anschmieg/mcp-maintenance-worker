@@ -8,6 +8,20 @@
   <p id="details"></p>
   <label id="setup" hidden>Setup code <input id="token" type="password" autocomplete="off"></label>
   <p><button id="resume" hidden>Continue host setup</button></p>
+  <section id="tailnet-guide" hidden>
+    <h2>One-time tailnet setup</h2>
+    <ol>
+      <li>Sign in to the <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Tailscale Machines page</a> as a tailnet administrator. Copy your target host’s Tailscale IPv4 address.</li>
+      <li>Enter the address below. In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, merge the snippet into the matching sections of your existing policy and save. Review existing grants and ACLs that also match the new tag. Broad rules still apply.</li>
+      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential</strong>, then <strong>OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> only and select <code>tag:openbot-probe</code>. Select <strong>Generate credential</strong>.</li>
+      <li>Copy the client ID and secret to the fields below before closing Tailscale’s credential dialog.</li>
+    </ol>
+    <p><label>Target Tailscale IPv4 <input id="policy-address" autocomplete="off"></label></p>
+    <textarea id="tailnet-policy" rows="10" cols="48" readonly aria-label="Tailnet policy snippet"></textarea>
+    <p><label>OAuth client ID <input id="oauth-id" autocomplete="off"></label></p>
+    <p><label>OAuth client secret <input id="oauth-secret" type="password" autocomplete="off"></label></p>
+  </section>
+  <p id="pending-device" hidden><a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Open Tailscale Machines</a></p>
   <textarea id="install-command" rows="8" cols="48" readonly hidden aria-label="Host installation command"></textarea>
   <div id="host-settings" hidden>
     <p><label>Tailscale IPv4 address <input id="address" autocomplete="off"></label></p>

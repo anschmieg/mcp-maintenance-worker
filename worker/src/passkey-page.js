@@ -36,10 +36,44 @@ function hostSetup(token) {
   setup.hidden = true;
   document.querySelector('#resume').hidden = true;
   tokenInput.value = '';
-  bind('Connect Tailscale', async () => {
+  const guide = document.querySelector('#tailnet-guide');
+  const pendingDevice = document.querySelector('#pending-device');
+  const policyAddress = document.querySelector('#policy-address');
+  const policySnippet = document.querySelector('#tailnet-policy');
+  const tag = 'tag:openbot-probe';
+  const updatePolicy = () => {
+    policySnippet.value = JSON.stringify({
+      tagOwners: { [tag]: ['autogroup:admin'] },
+      grants: [{ src: [tag], dst: [policyAddress.value.trim() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
+    }, null, 2);
+  };
+  policyAddress.oninput = updatePolicy;
+  updatePolicy();
+
+  async function connect() {
+    pendingDevice.hidden = true;
     const result = await post('prepare-host', { token });
+    if (result.state === 'unconfigured') {
+      guide.hidden = false;
+      details.textContent = 'Set up one restricted Tailscale credential for this tailnet.';
+      bind('Connect with OAuth', async () => {
+        const clientId = document.querySelector('#oauth-id').value.trim();
+        const secret = document.querySelector('#oauth-secret');
+        const clientSecret = secret.value.trim();
+        secret.value = '';
+        await post('configure-tailnet', { token, clientId, clientSecret });
+        guide.hidden = true;
+        bind('Check Tailnet connection', connect, 'Could not check the connection. Try again.');
+        action.disabled = true;
+        await connect();
+      }, 'Could not use the Tailscale credential. Check that Auth Keys has Write permission for tag:openbot-probe and try again.');
+      return;
+    }
     if (result.state !== 'connected') {
-      details.textContent = 'The Tailnet connection is pending. Check the probe settings or approve the device in Tailscale if required, then try again.';
+      details.textContent = 'The Tailnet connection is pending. If your tailnet requires device approval, open Tailscale Machines and approve openbot-tailnet-ssh-probe. Then check the connection again.';
+      guide.hidden = true;
+      pendingDevice.hidden = false;
+      bind('Check Tailnet connection', connect, 'Could not check the connection. Try again.');
       action.disabled = false;
       return;
     }
@@ -48,6 +82,7 @@ function hostSetup(token) {
     const command = document.querySelector('#install-command');
     command.value = result.installCommand;
     command.hidden = false;
+    document.querySelector('#address').value = policyAddress.value.trim();
     document.querySelector('#host-settings').hidden = false;
     bind('Save host and review check', async () => {
       const address = document.querySelector('#address').value.trim();
@@ -56,7 +91,8 @@ function hostSetup(token) {
       if (!job.review_url) throw new Error('Review unavailable');
       location.assign(job.review_url);
     }, 'The address or fingerprint could not be saved. Check both values. The pilot host cannot be changed after it is saved.');
-  }, 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.');
+  }
+  bind('Connect Tailscale', connect, 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.');
 }
 
 if (location.pathname.endsWith('/onboard')) {

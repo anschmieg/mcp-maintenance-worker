@@ -37,6 +37,7 @@ export type PasskeyEnv = {
   HOST_PROBE?: {
     runAmsEnrollmentCheck(): Promise<HostResult>;
     prepareEnrollment(): Promise<{ state: string; installCommand?: string }>;
+    configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
   };
 };
@@ -105,6 +106,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (!setupAuthorized(this.env, token) || !await this.#credential()) return null;
     if (!this.env.HOST_PROBE) return { state: 'unconfigured' };
     return this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
+  }
+
+  async configureTailnet(token: unknown, clientId: unknown, clientSecret: unknown) {
+    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+        typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(clientId) ||
+        typeof clientSecret !== 'string' || !/^[\x21-\x7e]{16,256}$/u.test(clientSecret)) return false;
+    return (await this.env.HOST_PROBE?.configureTailnet(clientId, clientSecret).catch(() => false)) ?? false;
   }
 
   async saveHost(token: unknown, address: unknown, fingerprint: unknown) {
@@ -252,6 +260,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/prepare-host') {
     const setup = await store.prepareHost(body.token);
     return setup ? reply(setup) : reject(403);
+  }
+  if (path === '/configure-tailnet') {
+    const connected = await store.configureTailnet(body.token, body.clientId, body.clientSecret);
+    return connected ? reply({ configured: true }) : reject(403);
   }
   if (path === '/save-host') {
     const saved = await store.saveHost(body.token, body.address, body.fingerprint);

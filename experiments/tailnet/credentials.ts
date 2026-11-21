@@ -1,4 +1,5 @@
 const api = 'https://api.tailscale.com/api/v2/';
+export const guidedTag = 'tag:openbot-probe';
 
 export type OAuthSettings = { TS_OAUTH_CLIENT_ID?: string; TS_OAUTH_CLIENT_SECRET?: string; TS_DEVICE_TAG?: string };
 

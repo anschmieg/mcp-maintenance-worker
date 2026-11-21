@@ -53,7 +53,7 @@ Use this repository as the source for changes. Keep live endpoints, host targets
   node --env-file=/path/to/private/adapter.env openbot-direct.mjs
   ```
 
-- **Private Tailnet probe** — configure `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_CLIENT_SECRET`, and `TS_DEVICE_TAG` on the isolated probe. The first two belong in Worker secrets. A scoped, pre-created `TS_AUTHKEY` remains an operator fallback.
+- **Private Tailnet probe** — use the browser setup below, or preconfigure `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_CLIENT_SECRET`, and `TS_DEVICE_TAG` on the private probe. A scoped, pre-created `TS_AUTHKEY` also remains an operator fallback. Store preconfigured credentials as Worker secrets.
 - **GitHub Actions** — tests use a generated local bearer token. Release publication uses GitHub's per-run token. Production credentials are unnecessary for either job.
 
 ## Dependency releases
@@ -66,12 +66,18 @@ The optional `experiments/tailnet` probe pins Undershell in an npm lockfile and 
 
 ## Pilot onboarding
 
-The private probe joins through a dedicated tagged Tailscale identity. An administrator creates a tag and a [Tailscale OAuth client](https://tailscale.com/docs/features/oauth-clients) scoped to `auth_keys` for that tag. Limit the tag to TCP port 22 on the pilot host. Configure the OAuth client credentials and tag on the private probe. When the owner connects Tailscale from the onboarding page, the probe obtains a short-lived, single-use key for a persistent tagged node. It leaves Tailscale device approval in effect. This pilot uses service OAuth credentials and does not require the owner to grant the probe their personal Tailscale identity. If an enrolled probe identity is revoked, an administrator must reset that probe before joining again.
+The private probe joins through a dedicated tagged Tailscale identity. One administrator configures it per tailnet for this Worker. The guided setup uses the OAuth credential once to mint a single-use tagged key, retains that key only while the device joins, and keeps the enrolled device state after joining. Tailscale device approval stays in effect. If the device identity is revoked or its enrollment key expires before joining, an administrator must reset the probe before joining again.
 
 Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes both `/mcp` and `/passkeys/*` to the Worker. Use the exact origin with no trailing slash. Passkeys are scoped to that hostname. Generate a separate random setup code with at least 32 bytes of entropy and set it as the `PASSKEY_SETUP_TOKEN` Worker secret. Give it only to the owner through a private channel.
 
 1. Open `/passkeys/onboard` and enter the setup code. Create your passkey and save it in your device's password manager. If you already registered the passkey, use **Continue host setup** with the same setup code.
-2. Select **Connect Tailscale**. If the Tailnet requires device approval, approve the dedicated probe in the Tailscale admin console and retry. The probe generates an Ed25519 SSH keypair and retains the private key in its Durable Object. Copy the command the page generates for the public key.
+2. Select **Connect Tailscale**. If the operator already configured a scoped credential, the Worker uses it. Otherwise follow the setup steps shown on the page.
+   1. Sign in to [Tailscale Machines](https://console.tailscale.com/admin/machines) as an administrator and copy the target host's Tailscale IPv4 address. Enter it on the Worker setup page.
+   2. Open [Access controls](https://console.tailscale.com/admin/acls) and merge the generated snippet into `tagOwners` and `grants` in your policy. It defines `tag:openbot-probe` and permits it to reach the target IP on `tcp:22`. Keep the rest of your policy and check that no broader existing ACL or grant also matches the new tag. [How grants combine](https://tailscale.com/docs/features/access-control/grants/grants-explained)
+   3. Open [Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials). Select **Credential**, then **OAuth**. Select **Write** for **Auth Keys** only, select `tag:openbot-probe`, then select **Generate credential**. Copy the client ID and secret into the Worker's setup page and select **Connect with OAuth**. The page does not retain the OAuth secret. [Tailscale OAuth setup](https://tailscale.com/docs/features/oauth-clients#setting-up-an-oauth-client)
+   4. If your tailnet requires device approval, open **Machines**, approve `openbot-tailnet-ssh-probe`, and select **Check Tailnet connection** on the Worker page.
+
+   The probe generates an Ed25519 SSH keypair and retains the private key in its Durable Object. Copy the command the page generates for the public key.
 3. On `ams`, have an administrator create the dedicated unprivileged `openbot-tailnet-probe` SSH account. Use a POSIX shell under that account to run the copied command. It appends a restricted public-key entry to the default `~/.ssh/authorized_keys` file and prints the server's Ed25519 fingerprint using `ssh-keygen`. This assumes standard OpenSSH paths and an enabled Ed25519 host key. Use the administrator's trusted host console to get the fingerprint and the host's Tailscale IPv4 address.
 4. Enter the address and fingerprint in the onboarding page. Review the check and approve it with the passkey. The private probe pins the host key and requests `openbot-enrollment-check-v1` on port 22. The `authorized_keys` entry uses shell built-ins to validate the request and return `openbot-host-ready-v1`. No standalone host script is installed. The page displays the result. You can also request another check in OpenBot with `start_host_enrollment` and inspect results using `passkey_test_status` or `maintenance_host_status`.
 5. Remove `PASSKEY_SETUP_TOKEN` after setup. The pilot supports one owner passkey and one fixed SSH enrollment. Changing the host pin or address requires an administrator reset of the pilot state.

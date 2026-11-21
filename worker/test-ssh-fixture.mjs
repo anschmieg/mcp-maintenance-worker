@@ -50,6 +50,7 @@ const pinned = 'SHA256:' + createHash('sha256').update(host.publicKey).digest('b
 let mode = 'normal';
 let attempts = 0;
 let enrolled;
+let tailnetConfigured = false;
 
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
@@ -82,7 +83,16 @@ createServer((request, response) => {
       port: ssh.address().port, fingerprint, privateKey: client.privateKey, interrupt: mode === 'interrupted',
     }));
   } else if (request.url === '/prepare') {
-    response.end(JSON.stringify({ state: 'connected', installCommand }));
+    response.end(JSON.stringify(tailnetConfigured ? { state: 'connected', installCommand } : { state: 'unconfigured' }));
+  } else if (request.url === '/oauth' && request.method === 'POST') {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      const { clientId, clientSecret } = JSON.parse(body);
+      const accepted = clientId === 'test-id' && clientSecret === 'example-oauth-secret';
+      if (accepted) tailnetConfigured = true;
+      response.end(JSON.stringify(accepted));
+    });
   } else if (request.url === '/save' && request.method === 'POST') {
     let body = '';
     request.on('data', chunk => { body += chunk; });
