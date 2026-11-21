@@ -1,0 +1,13 @@
+/maintenance-poc
+/worker/src/screen.wasm
+/worker/src/wasm_exec.js
+/worker/node_modules/
+/worker/.wrangler/
+/worker/.dev.vars*
+/worker/.env*
+/worker/.wrangler-ci.*.json
+/experiments/tailnet/src/
+/experiments/tailnet/node_modules/
+/experiments/tailnet/.wrangler/
+/experiments/tailnet/.dev.vars*
+/experiments/tailnet/.env*

@@ -1,0 +1,51 @@
+# Maintenance screening MCP — dry-run PoC
+
+`screen_maintenance_command` accepts `{ "command": "..." }`. It uses the `mvdan/sh` Bash parser, then applies exact literal-argument rules. `uptime` and `df -h /srv/techleaddocker` are example `auto_candidate` rules, not a Docker runner design. Everything outside the narrow rule set goes to review, except blank, oversized or syntactically invalid input. Automatic classification accepts only the exact arguments separated by ASCII spaces or tabs. Quotes, comments, terminators, and newlines require review. Hidden control and Unicode formatting characters are invalid.
+
+A review starts `elicitation/create` in form mode on the active `tools/call`. The form includes the request ID, reason and escaped input. The result distinguishes `accepted_test`, `not_confirmed`, `declined`, `dismissed`, and `elicitation_unavailable` (including unsupported clients or a timed-out/failed form). It never authorizes a host action, and every result includes `executed: false`. No command runner, host credentials, SSH, Docker connection or mount is implemented. A client can simulate every elicitation response. The Worker rejects extra tool arguments and always returns `approval_verified: false` and `execution_authorized: false`, including for `accepted_test`. A verified approval requires a separate trust mechanism before any executor is connected. Do not submit secrets or sensitive command text.
+
+## Local
+
+Go 1.26+ (use a patched release):
+
+```sh
+go test -v ./...
+go build -o maintenance-poc .
+./maintenance-poc --http
+```
+
+The default Streamable HTTP endpoint is `http://127.0.0.1:8765/mcp`. Run `./maintenance-poc` without arguments for MCP stdio. The integration tests start an HTTP server and a real MCP SDK client. Its elicitation handler simulates the different responses; it is not a human or portal test.
+
+## Coolify via Git
+
+1. Import this directory as the repository root of a private Git repo. In Coolify, use the Dockerfile build pack and container port `8765`.
+2. Put it behind HTTPS. Set `MCP_BEARER_TOKEN` as a runtime secret (generate a random value of at least 32 bytes). Do not put it in Git or forward it into a model prompt. A non-loopback bind refuses to start without a token. Do not mount Docker sockets or host volumes. Run one replica for this PoC: MCP sessions live in memory. If a health probe is required, use TCP rather than an unauthenticated HTTP request to `/mcp`.
+3. The HTTP client needs to send the upstream `Authorization: Bearer …` header on all MCP requests. Keep streaming and the `Mcp-Session-Id` header intact through the proxy. Allow at least 90 seconds for a form response. First test OpenBot connected directly; then add the same server to the Cloudflare MCP Portal only if the portal can authenticate to the upstream and relay elicitation on this path. Do not remove authentication to make the portal connect. The statically configured bearer token is only a PoC access control, not a per-agent identity or approver credential.
+4. From each route, try `uptime` (no form) and `uptime | wc` (form). Test submit with the checkbox checked, decline, and dismiss in separate calls. Verify the result refers to the displayed request ID and `executed` stays false. If the form cannot be relayed, record that path as unsupported/unverified rather than substituting approval in chat.
+
+## Cloudflare Worker (serverless)
+
+`worker/` uses Cloudflare Agents SDK and a Durable Object to keep the MCP session and its pending elicitation together. Both the Go server and the Worker build the same `internal/screen` package; the Worker calls it through Go WebAssembly. Use Node 22+ and Go 1.26+.
+
+```sh
+cd worker
+npm ci
+sh build.sh
+npx wrangler deploy --dry-run
+```
+
+For a local test, set `MCP_BEARER_TOKEN` in `worker/.dev.vars` (random secret, at least 32 bytes; ignored by Git) and run `npx wrangler dev --port 8795`. Set the same variable securely for the test process and run `node test.mjs` in another shell. Do not reuse the local test secret for a deployed service. The test exercises the live local Worker with an MCP SDK client, including all form results, and checks unauthenticated requests. It does not simulate the Portal or prove OpenBot renders the form.
+
+The Worker sends only commands classified as `review` to the Cloudflare Workers AI binding for a Clef Flash impact assessment. The model receives the submitted command text, the deterministic screening reason, and syntax facts from the same Bash parse. These facts describe structure such as a pipeline or redirection and do not determine runtime effects. The categories distinguish diagnostics, bounded scratch writes, sensitive reads, consequential changes, and uncertain effects. Its result is advisory and is returned beside the deterministic decision. Elicitation proceeds independently and a missing, invalid, or slow model response is marked `unavailable`. Set `REQUIRE_MODEL_ASSESSMENT=1` for MCP tests against a deployment with Workers AI available.
+
+`start_timing_probe` and `timing_probe_status` exercise asynchronous orchestration without starting a process. A Durable Object alarm completes a no-op 5–300 seconds after submission. Retry with the same UUID and delay to keep the original deadline. `node test-timing.mjs` closes and reopens MCP sessions, checks replay and verifies eventual completion (`PROBE_SECONDS=70` tests beyond one minute). It does not verify a machine-side runner, job cancellation, or recovery from host reboot.
+
+For deployment, set the runtime secret and configure a dedicated HTTPS route; `workers_dev` and preview URLs are off by default. No host networking or process execution is part of this service. Configure the Portal upstream with its documented `bearer` authentication mode. Test direct access first, then try the same two examples through OpenBot and the Portal. Do not remove endpoint authentication if the Portal fails to connect or relay the form.
+
+## Dependency releases
+
+The Worker uses exact npm versions and `worker/package-lock.json`. Go uses `go.mod` and `go.sum`. GitHub Actions checks direct Go and npm dependencies daily and on manual dispatch. If the manifests change, it installs the candidate set and runs Go tests, the WebAssembly build, and local Worker MCP tests. A successful run commits only the tested manifests and publishes a GitHub release tagged to that commit. Publishing stops if the branch moved during validation. Releases do not deploy to Cloudflare.
+
+The local tests use no production credentials. They cover screening, syntax facts, elicitation, and detached timing probes. Live Clef inference and live SSH or Tailscale connectivity are separate integration checks.
+
+The optional `experiments/tailnet` probe pins Undershell in an npm lockfile and `tailnet-do` to a Git commit, including its pinned Tailscale submodule. The update workflow builds and bundles that probe against candidate revisions. Tailnet enrollment and host authentication require a separately scoped live test. The probe has no command-execution endpoint.

@@ -1,0 +1,8 @@
+{
+  "name": "maintenance-tailnet-probe",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@workeryard/undershell": "0.2.0"
+  }
+}
