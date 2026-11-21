@@ -92,7 +92,8 @@ assert.equal((await post('configure-tailnet', {
 })).status, 403);
 assert.deepEqual(await (await post('configure-tailnet', { ...oauth, token: setupToken })).json(), { configured: true });
 const setupResult = await (await post('prepare-host', { token: setupToken })).json();
-assert.deepEqual(Object.keys(setupResult).sort(), ['installCommand', 'state']);
+assert.deepEqual(Object.keys(setupResult).sort(), ['deviceTag', 'installCommand', 'state']);
+assert.equal(setupResult.deviceTag, 'tag:openbot-probe');
 assert.equal(setupResult.state, 'connected');
 assert.match(setupResult.installCommand, /restrict,command=/);
 assert.doesNotMatch(setupResult.installCommand, /PRIVATE KEY|tskey-auth-/u);

@@ -38,17 +38,9 @@ function hostSetup(token) {
   tokenInput.value = '';
   const guide = document.querySelector('#tailnet-guide');
   const pendingDevice = document.querySelector('#pending-device');
-  const policyAddress = document.querySelector('#policy-address');
   const policySnippet = document.querySelector('#tailnet-policy');
   const tag = 'tag:openbot-probe';
-  const updatePolicy = () => {
-    policySnippet.value = JSON.stringify({
-      tagOwners: { [tag]: ['autogroup:admin'] },
-      grants: [{ src: [tag], dst: [policyAddress.value.trim() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
-    }, null, 2);
-  };
-  policyAddress.oninput = updatePolicy;
-  updatePolicy();
+  policySnippet.value = JSON.stringify({ tagOwners: { [tag]: ['autogroup:admin'] } }, null, 2);
 
   async function connect() {
     pendingDevice.hidden = true;
@@ -82,12 +74,22 @@ function hostSetup(token) {
     const command = document.querySelector('#install-command');
     command.value = result.installCommand;
     command.hidden = false;
-    document.querySelector('#address').value = policyAddress.value.trim();
+    const address = document.querySelector('#address');
+    if (result.deviceTag) {
+      const grant = document.querySelector('#grant-policy');
+      const updateGrant = () => {
+        grant.value = JSON.stringify({
+          grants: [{ src: [result.deviceTag], dst: [address.value.trim() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
+        }, null, 2);
+      };
+      address.oninput = updateGrant;
+      updateGrant();
+      document.querySelector('#host-grant').hidden = false;
+    }
     document.querySelector('#host-settings').hidden = false;
     bind('Save host and review check', async () => {
-      const address = document.querySelector('#address').value.trim();
       const fingerprint = document.querySelector('#fingerprint').value.trim();
-      const job = await post('save-host', { token, address, fingerprint });
+      const job = await post('save-host', { token, address: address.value.trim(), fingerprint });
       if (!job.review_url) throw new Error('Review unavailable');
       location.assign(job.review_url);
     }, 'The address or fingerprint could not be saved. Check both values. The pilot host cannot be changed after it is saved.');

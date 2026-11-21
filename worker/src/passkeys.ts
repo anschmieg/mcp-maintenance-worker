@@ -36,7 +36,7 @@ export type PasskeyEnv = {
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
   HOST_PROBE?: {
     runAmsEnrollmentCheck(): Promise<HostResult>;
-    prepareEnrollment(): Promise<{ state: string; installCommand?: string }>;
+    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string }>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
   };

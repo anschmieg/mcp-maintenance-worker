@@ -83,7 +83,9 @@ createServer((request, response) => {
       port: ssh.address().port, fingerprint, privateKey: client.privateKey, interrupt: mode === 'interrupted',
     }));
   } else if (request.url === '/prepare') {
-    response.end(JSON.stringify(tailnetConfigured ? { state: 'connected', installCommand } : { state: 'unconfigured' }));
+    response.end(JSON.stringify(tailnetConfigured
+      ? { state: 'connected', installCommand, deviceTag: 'tag:openbot-probe' }
+      : { state: 'unconfigured' }));
   } else if (request.url === '/oauth' && request.method === 'POST') {
     let body = '';
     request.on('data', chunk => { body += chunk; });

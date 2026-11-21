@@ -85,8 +85,9 @@ export class ProbeNode extends TailnetObject {
   }
 
   async prepareEnrollment() {
-    if (!oauthConfigured(this.env) && !this.env.TS_AUTHKEY &&
-        !await this.ctx.storage.get<GuidedJoin>('guided-tailnet-join')) return { state: 'unconfigured' };
+    const guided = await this.ctx.storage.get<GuidedJoin>('guided-tailnet-join');
+    const deviceTag = guided ? guidedTag : oauthConfigured(this.env) ? this.env.TS_DEVICE_TAG : undefined;
+    if (!deviceTag && !this.env.TS_AUTHKEY) return { state: 'unconfigured' };
     const candidate = await generateSshKey();
     const key = await this.ctx.storage.transaction(async tx => {
       const existing = await tx.get<Key>('enrollment-ssh-key');
@@ -95,7 +96,7 @@ export class ProbeNode extends TailnetObject {
       return candidate;
     });
     const connected = await this.#readyTailnet().then(() => true, () => false);
-    return { state: connected ? 'connected' : 'tailnet_pending', installCommand: hostInstallCommand(key.publicKey) };
+    return { state: connected ? 'connected' : 'tailnet_pending', installCommand: hostInstallCommand(key.publicKey), deviceTag };
   }
 
   async saveEnrollmentHost(host: Host) {

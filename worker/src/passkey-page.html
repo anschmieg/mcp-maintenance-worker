@@ -11,20 +11,22 @@
   <section id="tailnet-guide" hidden>
     <h2>One-time tailnet setup</h2>
     <ol>
-      <li>Sign in to the <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Tailscale Machines page</a> as a tailnet administrator. Copy your target host’s Tailscale IPv4 address.</li>
-      <li>Enter the address below. In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, merge the snippet into the matching sections of your existing policy and save. Review existing grants and ACLs that also match the new tag. Broad rules still apply.</li>
+      <li>In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, add this tag under <code>tagOwners</code>. Keep the rest of your policy and check that broad rules do not grant the new tag unintended access.</li>
       <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential</strong>, then <strong>OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> only and select <code>tag:openbot-probe</code>. Select <strong>Generate credential</strong>.</li>
-      <li>Copy the client ID and secret to the fields below before closing Tailscale’s credential dialog.</li>
+      <li>Paste the client ID and secret below, then select <strong>Connect with OAuth</strong>.</li>
     </ol>
-    <p><label>Target Tailscale IPv4 <input id="policy-address" autocomplete="off"></label></p>
-    <textarea id="tailnet-policy" rows="10" cols="48" readonly aria-label="Tailnet policy snippet"></textarea>
+    <textarea id="tailnet-policy" rows="5" cols="48" readonly aria-label="Tailnet tag policy snippet"></textarea>
     <p><label>OAuth client ID <input id="oauth-id" autocomplete="off"></label></p>
     <p><label>OAuth client secret <input id="oauth-secret" type="password" autocomplete="off"></label></p>
   </section>
   <p id="pending-device" hidden><a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Open Tailscale Machines</a></p>
   <textarea id="install-command" rows="8" cols="48" readonly hidden aria-label="Host installation command"></textarea>
   <div id="host-settings" hidden>
-    <p><label>Tailscale IPv4 address <input id="address" autocomplete="off"></label></p>
+    <p><label>Host Tailscale IPv4 address <input id="address" autocomplete="off"></label> <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Find it in Machines</a></p>
+    <div id="host-grant" hidden>
+      <p>Add this grant in <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a> to allow SSH to this host.</p>
+      <textarea id="grant-policy" rows="8" cols="48" readonly aria-label="Host SSH grant snippet"></textarea>
+    </div>
     <p><label>SSH host key fingerprint <input id="fingerprint" autocomplete="off"></label></p>
   </div>
   <p><button id="action" disabled>Continue</button></p>
