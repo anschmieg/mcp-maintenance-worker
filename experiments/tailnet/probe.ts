@@ -1,6 +1,6 @@
 import { TailnetObject, Tailnet } from './src/index.js';
 import { runEnrollmentCheck, runServiceRestart } from './ssh-check';
-import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, type Host, type TailnetDevice } from './credentials';
+import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, maintenanceAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 type Key = Awaited<ReturnType<typeof generateSshKey>>;
@@ -38,8 +38,8 @@ export class HostVerifier extends WorkerEntrypoint {
     return this.#node().configureTailnet(clientId, clientSecret);
   }
 
-  async prepareHostKey(address: string) {
-    return this.#node().prepareHostKey(address);
+  async prepareHostKey(address: string, account: HostAccount = legacyAccount) {
+    return this.#node().prepareHostKey(address, account);
   }
 
   async saveEnrollmentHost(host: Host) {
@@ -120,7 +120,7 @@ export class ProbeNode extends TailnetObject {
       : tagged ? (joined ? undefined : await mintTaggedAuthKey(this.env)) : this.env.TS_AUTHKEY;
     if (!interactive && !guided && !tagged && !authKey) throw new Error('Tailscale enrollment is not configured');
     const node = await Tailnet.start(this.ctx, {
-      hostname: 'openbot-tailnet-ssh-probe', authKey, ephemeral: !interactive && !guided && !tagged,
+      hostname: tailnetHostname, authKey, ephemeral: !interactive && !guided && !tagged,
       tags: guided ? [guidedTag] : tagged ? [this.env.TS_DEVICE_TAG] : [],
       statePrefix: interactive ? 'tailnet:interactive-v1:' : guided ? 'tailnet:guided-v1:' : tagged ? 'tailnet:tagged-v1:' : 'tailnet:',
     });
@@ -162,11 +162,11 @@ export class ProbeNode extends TailnetObject {
     };
   }
 
-  async prepareHostKey(address: string) {
-    if (!validTailnetIpv4(address)) return null;
+  async prepareHostKey(address: string, account: HostAccount = legacyAccount) {
+    if (!validTailnetIpv4(address) || (account !== legacyAccount && account !== maintenanceAccount)) return null;
     const slot = 'enrollment-ssh-key:' + address;
     const existing = await this.ctx.storage.get<Key>(slot);
-    if (existing) return hostInstallCommand(existing.publicKey);
+    if (existing) return hostInstallCommand(existing.publicKey, account);
     const candidate = await generateSshKey();
     const key = await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Key>(slot);
@@ -176,7 +176,7 @@ export class ProbeNode extends TailnetObject {
       await tx.put(slot, selected);
       return selected;
     });
-    return hostInstallCommand(key.publicKey);
+    return hostInstallCommand(key.publicKey, account);
   }
 
   async saveEnrollmentHost(host: Host) {
@@ -225,7 +225,7 @@ export class ProbeNode extends TailnetObject {
     if (operation !== 'check' && operation !== 'restart') return { state: 'unconfigured', executed: false };
     const execute = operation === 'restart' ? runServiceRestart : runEnrollmentCheck;
     return execute(await tailnet.connect(host.address + ':22'), {
-      PROBE_SSH_KEY: key.privateKey, PROBE_HOST_FINGERPRINT: host.fingerprint,
+      PROBE_SSH_KEY: key.privateKey, PROBE_HOST_FINGERPRINT: host.fingerprint, username: host.account ?? legacyAccount,
     });
   }
 }

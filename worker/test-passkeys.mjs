@@ -130,6 +130,15 @@ const canceledPair = await (await post('begin-host-pairing', { token: setupToken
 assert.equal((await post('cancel-pairing', { token: mcpToken, id: canceledPair.id })).status, 403);
 assert.deepEqual(await (await post('cancel-pairing', { token: setupToken, id: canceledPair.id })).json(), { state: 'invalidated' });
 assert.equal((await downloadPairingScript(canceledPair)).status, 403);
+const terminalCancelPair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
+assert.equal((await fetch(origin + '/passkeys/host-pairing?pair=' + terminalCancelPair.id, {
+  method: 'POST', headers: { Authorization: 'Bearer ' + terminalCancelPair.download.token },
+  body: new URLSearchParams({ account_action: 'canceled' }),
+})).status, 200);
+assert.equal((await downloadPairingScript(terminalCancelPair)).status, 403);
+assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: terminalCancelPair.id })).json(), {
+  state: 'pairing_canceled',
+});
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
 assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sudo sh$/u);
 assert.equal(pair.installCommand.split('\n').length, 1);
@@ -140,21 +149,24 @@ assert.equal((await fetch(pair.download.url)).status, 403);
 assert.equal((await downloadPairingScript(pair, mcpToken)).status, 403);
 const install = await (await downloadPairingScript(pair)).text();
 assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
-assert.match(install, /useradd --system --create-home.*openbot-tailnet-probe/u);
-assert.match(install, /runuser -u openbot-tailnet-probe/u);
+assert.match(install, /account='maintenance-relay'/u);
+assert.match(install, /useradd --system --create-home/u);
+assert.ok(install.includes('read -r answer </dev/tty'));
+assert.ok(install.includes('runuser -u "$account"'));
 assert.match(install, /tailscale ip -4/u);
 execFileSync('/bin/sh', ['-n', '-c', install]);
 const callbackToken = pair.download.token;
-function hostCallback(token, fingerprint, pairing = pair.id) {
+function hostCallback(token, fingerprint, pairing = pair.id, action = 'created') {
   return fetch(origin + '/passkeys/host-pairing?pair=' + pairing, {
     method: 'POST', headers: { Authorization: 'Bearer ' + token },
-    body: new URLSearchParams({ fingerprint }),
+    body: new URLSearchParams({ fingerprint, account_action: action }),
   });
 }
 assert.equal((await hostCallback(mcpToken, hostPin)).status, 403);
 assert.equal((await hostCallback(callbackToken, 'invalid')).status, 403);
 assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json(),
   { state: 'waiting_for_host' });
+assert.equal((await hostCallback(callbackToken, hostPin, pair.id, 'invalid')).status, 403);
 assert.equal((await hostCallback(callbackToken, hostPin)).status, 200);
 assert.equal((await hostCallback(callbackToken, hostPin)).status, 403);
 assert.equal((await downloadPairingScript(pair)).status, 403);
@@ -162,6 +174,8 @@ assert.equal((await post('finish-host-pairing', { token: mcpToken, id: pair.id }
 const hostSetup = await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json();
 assert.equal(hostSetup.state, 'pending');
 assert.equal(hostSetup.host, address);
+assert.equal(hostSetup.execution_identity, 'maintenance-relay');
+assert.equal(hostSetup.account_action, 'created');
 assert.equal(hostSetup.fingerprint, hostPin);
 assert.equal(hostSetup.executed, false);
 assert.equal(await attempts(), 0);
@@ -267,9 +281,10 @@ const alternateInstall = await (await downloadPairingScript(alternatePair)).text
 assert.notEqual(installedPublicKey(alternateInstall), installedPublicKey(install));
 const alternateToken = alternatePair.download.token;
 assert.equal((await hostCallback(alternateToken, hostPin, pair.id)).status, 403);
-assert.equal((await hostCallback(alternateToken, hostPin, alternatePair.id)).status, 200);
+assert.equal((await hostCallback(alternateToken, hostPin, alternatePair.id, 'reused')).status, 200);
 const alternateSetup = await (await post('finish-host-pairing', { token: setupToken, id: alternatePair.id })).json();
 assert.equal(alternateSetup.host, alternateAddress);
+assert.equal(alternateSetup.account_action, 'reused');
 assert.deepEqual((await call('maintenance_hosts')).hosts, [{ address }, { address: alternateAddress }]);
 assert.equal((await call('start_host_enrollment', randomUUID())).state, 'host_selection_required');
 const alternateJob = randomUUID();

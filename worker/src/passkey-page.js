@@ -119,7 +119,7 @@ function hostSetup(token) {
     guide.hidden = true;
     for (let attempt = 0; result.state === 'tailnet_pending' && attempt < 60; attempt++) {
       details.textContent = result.needsDeviceApproval
-        ? 'Your tailnet requires device approval. Approve openbot-tailnet-ssh-probe in Tailscale Machines.'
+        ? 'Your tailnet requires device approval. Approve the Maintenance Relay device in Tailscale Machines.'
         : result.loginUrl ? 'Open Tailscale to complete sign-in. This page will continue when the device joins.'
           : result.deviceTag ? 'Waiting for the tagged device. If device approval is required, approve it in Tailscale Machines.'
             : 'Waiting for Tailscale to connect…';
@@ -198,17 +198,19 @@ function hostSetup(token) {
           }
         };
         title.textContent = 'Pair the selected host';
-        details.textContent = 'The installer creates a dedicated SSH account if needed, installs its restricted key, and reports the host fingerprint.';
+        details.textContent = 'The installer asks whether to create or use the maintenance-relay account. It then sends the host fingerprint back here.';
       }
       document.querySelector('#host-settings').hidden = true;
       action.hidden = true;
       status.textContent = 'Waiting for the command to finish on the selected host. If it fails, check the message in that terminal.';
+      let pairingCanceled = false;
       for (let attempt = 0; attempt < 180; attempt++) {
         const job = await post('finish-host-pairing', { token, id: pair.id });
         if (job.review_url) {
           location.assign(job.review_url);
           return;
         }
+        if (job.state === 'pairing_canceled') { pairingCanceled = true; break; }
         if (job.state === 'pairing_expired') break;
         if (job.state !== 'waiting_for_host') {
           status.textContent = 'Host check status: ' + job.state + '.';
@@ -217,7 +219,8 @@ function hostSetup(token) {
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
       document.querySelector('#pair-command').hidden = true;
-      status.textContent = 'This command has expired or was replaced. Generate a fresh one to continue.';
+      status.textContent = pairingCanceled ? 'Host pairing was canceled in the terminal.'
+        : 'This command has expired or was replaced. Generate a fresh one to continue.';
       action.hidden = false;
       bind('Generate a new command', connect, 'Could not refresh the host list. Try again.');
     }, 'Host setup did not complete. Reload the page to retry.');
@@ -282,7 +285,7 @@ if (location.pathname.endsWith('/onboard')) {
       const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
       const approved = await post('approve', { job, response });
       if (request.dry_run) {
-        status.textContent = 'Approval verified. You can close this tab and return to OpenBot to check the result.';
+        status.textContent = 'Approval verified. You can close this tab and return to your MCP client to check the result.';
         return;
       }
       status.textContent = request.service ? 'Approval verified. Restarting the service…' : 'Approval verified. Checking SSH enrollment…';
@@ -293,8 +296,8 @@ if (location.pathname.endsWith('/onboard')) {
       }
       status.textContent = result.state === 'service_restarted' ? 'Service restarted.'
         : result.state === 'verified' ? 'Host enrollment verified.'
-        : 'Host check status: ' + result.state + '. Check job ' + job + ' in OpenBot for the result.';
-    }, 'Approval did not complete. Retry or return to OpenBot if the request expired.');
+        : 'Host check status: ' + result.state + '. Check job ' + job + ' in your MCP client for the result.';
+    }, 'Approval did not complete. Retry or return to your MCP client if the request expired.');
   }).catch(() => {
     status.textContent = 'This request is unavailable, expired, or already approved.';
   });

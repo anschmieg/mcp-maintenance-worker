@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  enrollmentCommand, maintenanceAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -79,7 +79,7 @@ let deviceLogin = false;
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
   connection.on('authentication', auth => {
-    if (auth.username !== 'openbot-tailnet-probe' || auth.method !== 'publickey') return auth.reject();
+    if (![maintenanceAccount, legacyAccount].includes(auth.username) || auth.method !== 'publickey') return auth.reject();
     const clientPublic = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey))
       .find(key => auth.key.data.equals(key.getPublicSSH()));
     if (!clientPublic) return auth.reject();
@@ -110,7 +110,7 @@ createServer(async (request, response) => {
   if (url.pathname === '/install') {
     const key = clientKey ?? await generateSshKey();
     clientKeys.set(address, key);
-    response.end(JSON.stringify(hostInstallCommand(key.publicKey)));
+    response.end(JSON.stringify(hostInstallCommand(key.publicKey, url.searchParams.get('account') ?? legacyAccount)));
   } else if (url.pathname === '/fixture') {
     const target = enrolled.get(address);
     const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : target?.fingerprint;

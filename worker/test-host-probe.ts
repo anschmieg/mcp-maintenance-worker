@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
-import { sameEnrollmentHost, type Host } from '../experiments/tailnet/credentials';
+import { sameEnrollmentHost, legacyAccount, type HostAccount, type Host } from '../experiments/tailnet/credentials';
 import { runEnrollmentCheck, runServiceRestart } from '../experiments/tailnet/ssh-check';
 
 export class HostVerifier extends WorkerEntrypoint {
@@ -19,8 +19,8 @@ export class HostVerifier extends WorkerEntrypoint {
     return (await fetch('http://127.0.0.1:8796/prepare')).json();
   }
 
-  async prepareHostKey(address: string) {
-    return (await fetch('http://127.0.0.1:8796/install?address=' + encodeURIComponent(address))).json();
+  async prepareHostKey(address: string, account: HostAccount) {
+    return (await fetch('http://127.0.0.1:8796/install?address=' + encodeURIComponent(address) + '&account=' + encodeURIComponent(account))).json();
   }
 
   async saveEnrollmentHost(host: { address: string; fingerprint: string }) {
@@ -48,7 +48,7 @@ export class HostVerifier extends WorkerEntrypoint {
       readable: socket.readable,
       writable: socket.writable,
       close: () => socket.close(),
-    }, { PROBE_HOST_FINGERPRINT: fingerprint, PROBE_SSH_KEY: privateKey });
+    }, { PROBE_HOST_FINGERPRINT: fingerprint, PROBE_SSH_KEY: privateKey, username: expected.account ?? legacyAccount });
     if (interrupt) throw new Error('Test service stopped responding after execution');
     if (response.headers.get('X-Fixture-Mode') === 'hang') {
       await new Promise(resolve => setTimeout(resolve, 300_000));

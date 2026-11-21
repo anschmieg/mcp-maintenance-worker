@@ -1,8 +1,8 @@
 import { SshClient } from '@workeryard/undershell';
-import { enrollmentCommand, enrollmentMarker, restartCommand, restartMarker } from './credentials';
+import { enrollmentCommand, enrollmentMarker, restartCommand, restartMarker, type HostAccount } from './credentials';
 
 type SshSocket = Parameters<typeof SshClient.connect>[0]['socket'];
-type Credentials = { PROBE_SSH_KEY: string; PROBE_HOST_FINGERPRINT: string };
+type Credentials = { PROBE_SSH_KEY: string; PROBE_HOST_FINGERPRINT: string; username: HostAccount };
 
 export async function withSsh<T>(socket: SshSocket, credentials: Credentials, action: (ssh: SshClient) => Promise<T>) {
   let hostKeyVerified = false;
@@ -10,7 +10,7 @@ export async function withSsh<T>(socket: SshSocket, credentials: Credentials, ac
   try {
     ssh = await SshClient.connect({
       socket,
-      username: 'openbot-tailnet-probe',
+      username: credentials.username,
       auth: { kind: 'privateKey', privateKey: credentials.PROBE_SSH_KEY },
       hostKeyFingerprint: credentials.PROBE_HOST_FINGERPRINT,
       verifyHostKey() {

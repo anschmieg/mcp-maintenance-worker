@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenBot Maintenance</title>
+<title>Maintenance Relay</title>
 <link rel="stylesheet" href="/passkeys/style.css">
 <script src="/passkeys/browser.js" defer></script>
 </head>
@@ -15,7 +15,7 @@
       <path d="m12 3 7 3v5c0 4-2.5 7.5-7 10-4.5-2.5-7-6-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>
     </svg>
   </span>
-  <span>OpenBot Maintenance</span>
+  <span>Maintenance Relay</span>
 </header>
 <main class="card">
   <ol class="steps" id="steps" aria-label="Setup progress" hidden>
@@ -59,7 +59,7 @@
   </div>
   <section id="pair-command" hidden>
     <label for="install-command">Host setup command</label>
-    <p class="hint">Run it on the selected Linux host from your usual admin account. Use SSH if you’re on a different machine. The command expires after 15 minutes.</p>
+    <p class="hint">Run it on the selected Linux host from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes.</p>
     <textarea id="install-command" rows="3" readonly spellcheck="false"></textarea>
     <div class="command-actions">
       <button id="copy-install" type="button">Copy command</button>

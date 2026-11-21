@@ -8,12 +8,12 @@ import {
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
 import approvalStyles from './passkey-page.css';
-import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
 const empty = { executed: false };
-const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: 'openbot-tailnet-probe', dry_run: true } as const;
+const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: maintenanceAccount, dry_run: true } as const;
 const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false } as const;
 const restartOperation = 'restart ' + restartUnit;
 const isHostOperation = (operation: string) => operation === hostCheck.operation || operation === restartOperation;
@@ -24,7 +24,7 @@ type HostResult =
   | { state: 'diagnostic_failed' | 'restart_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | (Omit<typeof hostCheck, 'host' | 'operation'> & { host: string; fingerprint: string; enrollmentId?: string; operation: string });
+  target: typeof diagnostic | (Omit<typeof hostCheck, 'host' | 'operation' | 'execution_identity'> & { host: string; fingerprint: string; enrollmentId?: string; operation: string; execution_identity: HostAccount });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
   approved_at?: number;
@@ -33,7 +33,7 @@ type Job = {
   host_result?: HostResult;
 };
 type Enrollment = { challenge: string; expires: number };
-type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string };
+type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'canceled' };
 const pairingLifetime = 15 * 60_000;
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -48,9 +48,9 @@ export type PasskeyEnv = {
     prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
     startDeviceLogin(): Promise<boolean>;
     removeEnrollmentHost(expected: Host): Promise<boolean>;
-    prepareHostKey(address: string): Promise<string | null>;
+    prepareHostKey(address: string, account: HostAccount): Promise<string | null>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
-    saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
+    saveEnrollmentHost(host: Host): Promise<boolean>;
   };
 };
 
@@ -204,7 +204,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const previous = previousId ? await tx.get<Pairing>('pairing:' + previousId) : undefined;
       if (previous?.fingerprint) return previous;
       if (previousId) await tx.delete('pairing:' + previousId);
-      const next = { id, address, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
+      const next = { id, address, account: maintenanceAccount, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
       await tx.put('pairing:' + id, next);
       await tx.put(slot, id);
       return next;
@@ -224,14 +224,19 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async pairingScript(id: string | null, token: string) {
     if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
     const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
-    if (!pair || pair.fingerprint || pair.expires <= Date.now() ||
+    if (!pair || !pair.tokenHash || pair.fingerprint || pair.expires <= Date.now() ||
         !timingSafeEqual(Buffer.from(pair.tokenHash), Buffer.from(hashToken(token)))) return null;
-    const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address).catch(() => null);
+    const account = pair.account ?? legacyAccount;
+    const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address, account).catch(() => null);
     if (!install) return null;
     const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
+    const callback = 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + token);
     return [
       '#!/bin/sh',
+      'cancel_pairing() {',
+      '  ' + callback + ' --data-urlencode "account_action=canceled" ' + shellQuote(url.href),
+      '}',
       'pair_host() {',
       '  PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin; export PATH',
       '  if [ "$(uname -s)" != Linux ]; then',
@@ -247,12 +252,27 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       '  case "$fingerprint" in SHA256:*) ;; *)',
       "    echo 'No SSH host key found. Enable OpenSSH Server on this machine, then run the command again.' >&2; return 1;;",
       '  esac',
-      '  if ! id -u openbot-tailnet-probe >/dev/null 2>&1; then',
-      '    useradd --system --create-home --home-dir /var/lib/openbot-tailnet-probe --shell /bin/sh openbot-tailnet-probe || return 1',
+      '  account=' + shellQuote(account),
+      '  if ! (true </dev/tty) 2>/dev/null; then',
+      "    echo 'Run the installer in an interactive terminal on the selected host.' >&2; return 1",
       '  fi',
-      '  runuser -u openbot-tailnet-probe -- /bin/sh -c ' + shellQuote(install) + ' &&',
-      '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + token) +
-        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url.href),
+      '  if account_uid=$(id -u "$account" 2>/dev/null); then',
+      '    if [ "$account_uid" = 0 ]; then',
+      "      echo 'The dedicated account must be unprivileged.' >&2; return 1",
+      '    fi',
+      '    printf "1) Use the existing %s account and install its restricted key\n2) Cancel\nChoice [2]: " "$account" >/dev/tty',
+      '    IFS= read -r answer </dev/tty || return 1',
+      '    if [ "$answer" != 1 ]; then cancel_pairing; return 1; fi',
+      '    account_action=reused',
+      '  else',
+      '    printf "1) Create the dedicated %s account and install its restricted key\n2) Cancel\nChoice [2]: " "$account" >/dev/tty',
+      '    IFS= read -r answer </dev/tty || return 1',
+      '    if [ "$answer" != 1 ]; then cancel_pairing; return 1; fi',
+      '    useradd --system --create-home --home-dir /var/lib/"$account" --shell /bin/sh "$account" || return 1',
+      '    account_action=created',
+      '  fi',
+      '  runuser -u "$account" -- /bin/sh -c ' + shellQuote(install) + ' &&',
+      '  ' + callback + ' --data-urlencode "fingerprint=$fingerprint" --data-urlencode "account_action=$account_action" ' + shellQuote(url.href),
       '}',
       'pair_host',
       '',
@@ -274,14 +294,25 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
   }
 
-  async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown) {
-    if ((id !== null && !uuid.test(id)) || !/^[0-9a-f-]{72}$/u.test(callbackToken) ||
-        typeof fingerprint !== 'string' || !/^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)) return false;
+  async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown, accountAction: unknown) {
+    if ((id !== null && !uuid.test(id)) || !/^[0-9a-f-]{72}$/u.test(callbackToken)) return false;
+    const canceled = accountAction === 'canceled';
+    const candidateFingerprint = typeof fingerprint === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)
+      ? fingerprint : undefined;
+    if (canceled ? fingerprint !== null : !candidateFingerprint) return false;
     return this.ctx.storage.transaction(async tx => {
       const slot = id === null ? 'pairing' : 'pairing:' + id;
       const pair = await tx.get<Pairing>(slot);
       if (!pair || pair.fingerprint || pair.expires <= Date.now() || pair.tokenHash !== hashToken(callbackToken)) return false;
-      await tx.put<Pairing>(slot, { ...pair, fingerprint, tokenHash: '' });
+      if (canceled) {
+        await tx.put<Pairing>(slot, { ...pair, accountAction: 'canceled', tokenHash: '' });
+        return true;
+      }
+      if (pair.account && accountAction !== 'created' && accountAction !== 'reused') return false;
+      await tx.put<Pairing>(slot, {
+        ...pair, fingerprint: candidateFingerprint, tokenHash: '',
+        accountAction: accountAction === 'created' || accountAction === 'reused' ? accountAction : undefined,
+      });
       return true;
     });
   }
@@ -291,6 +322,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const next = 'pairing:' + id;
     const slot = await this.ctx.storage.get<Pairing>(next) ? next : 'pairing';
     const pair = await this.ctx.storage.get<Pairing>(slot);
+    if (pair?.id === id && pair.accountAction === 'canceled') return { state: 'pairing_canceled' };
     if (pair?.id !== id || (!pair.fingerprint && pair.expires <= Date.now())) return { state: 'pairing_expired' };
     if (!pair.fingerprint) return { state: 'waiting_for_host' };
     const finishing = this.#finishingPairings.get(id);
@@ -313,7 +345,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         await this.ctx.storage.get('removing-host:' + pair.address)) return null;
     const legacy = await this.ctx.storage.get<Host>('onboarding-host');
     const host = {
-      address: pair.address, fingerprint: pair.fingerprint,
+      address: pair.address, fingerprint: pair.fingerprint, account: pair.account,
       enrollmentId: slot === 'pairing' || (legacy?.address === pair.address && legacy.fingerprint === pair.fingerprint)
         ? undefined : pair.id,
     };
@@ -332,7 +364,8 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       await tx.put<Pairing>(slot, { ...current, reviewJobId: replacement });
       return replacement;
     });
-    return reviewJobId ? this.start(reviewJobId, true, host.address) : null;
+    if (!reviewJobId) return null;
+    return { ...await this.start(reviewJobId, true, host.address), account_action: pair.accountAction };
   }
 
   async start(jobId: string, enrollment = false, address?: string, restart = false) {
@@ -352,7 +385,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         (legacy?.address === address ? legacy : undefined) : hosts?.values().next().value ?? legacy;
     }
     if (enrollment && !host) return { state: 'host_setup_required', ...empty };
-    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, enrollmentId: host.enrollmentId, operation: restart ? restartOperation : hostCheck.operation } : diagnostic;
+    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, execution_identity: host.account ?? legacyAccount, enrollmentId: host.enrollmentId, operation: restart ? restartOperation : hostCheck.operation } : diagnostic;
     const options = await generateAuthenticationOptions({
       rpID: origin.hostname, userVerification: 'required',
       allowCredentials: [{ id: credential.id, transports: credential.transports }],
@@ -361,7 +394,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const existing = await tx.get<Job>(key);
       if (existing) return existing.target.operation === target.operation &&
         existing.target.host === target.host && (target.dry_run || (!existing.target.dry_run &&
-          existing.target.fingerprint === target.fingerprint && existing.target.enrollmentId === target.enrollmentId));
+          existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId));
       await tx.put<Job>(key, { target, options, expires_at: Date.now() + this.#jobLifetime() });
       return true;
     });
@@ -447,7 +480,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
     if (accepted && !job.target.dry_run) {
       const expected = {
-        address: job.target.host, fingerprint: job.target.fingerprint, enrollmentId: job.target.enrollmentId,
+        address: job.target.host, fingerprint: job.target.fingerprint, enrollmentId: job.target.enrollmentId, account: job.target.execution_identity,
       };
       this.ctx.waitUntil(this.#verifyHost(key, expected, job.target.operation));
     }
@@ -526,8 +559,9 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (!auth.startsWith('Bearer ') || Number(length) > 1024 ||
         mediaType !== 'application/x-www-form-urlencoded') return reject(403);
     const form = new URLSearchParams(await request.text());
-    return await store.receiveFingerprint(url.searchParams.get('pair'), auth.slice(7), form.get('fingerprint'))
-      ? new Response('Host fingerprint received.\n', { headers }) : reject(403);
+    return await store.receiveFingerprint(url.searchParams.get('pair'), auth.slice(7), form.get('fingerprint'), form.get('account_action'))
+      ? new Response(form.get('account_action') === 'canceled' ? 'Pairing canceled.\n' : 'Host fingerprint received.\n', { headers })
+      : reject(403);
   }
   if (request.headers.get('Origin') !== origin.origin) return reject(403);
   if (request.headers.get('Content-Type') !== 'application/json') return reject(415);

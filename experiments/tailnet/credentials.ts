@@ -1,4 +1,9 @@
 const api = 'https://api.tailscale.com/api/v2/';
+export const maintenanceAccount = 'maintenance-relay';
+export const legacyAccount = 'openbot-tailnet-probe';
+export const tailnetHostname = 'maintenance-relay';
+export type HostAccount = typeof maintenanceAccount | typeof legacyAccount;
+
 export const guidedTag = 'tag:openbot-probe';
 
 export type OAuthSettings = { TS_OAUTH_CLIENT_ID?: string; TS_OAUTH_CLIENT_SECRET?: string; TS_DEVICE_TAG?: string };
@@ -94,19 +99,20 @@ export const forcedCommand =
   restartCommand + ') /usr/bin/sudo -n -- /usr/bin/systemctl restart ' + restartUnit +
   ' && echo ' + restartMarker + ';; *) exit 126;; esac';
 
-export function hostInstallCommand(publicKey: string) {
+export function hostInstallCommand(publicKey: string, account: HostAccount = maintenanceAccount) {
   if (!/^ssh-ed25519 [A-Za-z0-9+/]{68}$/u.test(publicKey)) throw new Error('Invalid enrollment public key');
+  if (account !== maintenanceAccount && account !== legacyAccount) throw new Error('Invalid maintenance account');
   const escaped = forcedCommand.replace(/["\\]/gu, '\\$&');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
-    'test "$(id -un)" = openbot-tailnet-probe && umask 077 && mkdir -p "$HOME/.ssh" &&',
+    'test "$(id -un)" = ' + account + ' && umask 077 && mkdir -p "$HOME/.ssh" &&',
     '  chmod 700 "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" &&',
     "  key='" + line + "' &&",
     '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "%s\\n" "$key" >> "$HOME/.ssh/authorized_keys")',
   ].join('\n');
 }
 
-export type Host = { address: string; fingerprint: string; enrollmentId?: string };
+export type Host = { address: string; fingerprint: string; enrollmentId?: string; account?: HostAccount };
 
 export function validTailnetIpv4(address: string) {
   if (typeof address !== 'string') return false;
@@ -117,10 +123,12 @@ export function validTailnetIpv4(address: string) {
 }
 
 export function validEnrollmentHost(host: Host) {
-  return validTailnetIpv4(host.address) && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
+  return (host.account === undefined || host.account === maintenanceAccount || host.account === legacyAccount) &&
+    validTailnetIpv4(host.address) && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
 }
 
 export function sameEnrollmentHost(current: Host | undefined, expected: Host) {
   return current?.address === expected.address && current.fingerprint === expected.fingerprint &&
-    current.enrollmentId === expected.enrollmentId;
+    current.enrollmentId === expected.enrollmentId &&
+    (current.account ?? legacyAccount) === (expected.account ?? legacyAccount);
 }
