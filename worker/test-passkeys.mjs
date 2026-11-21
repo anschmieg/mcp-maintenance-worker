@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { encodeCBOR } from '@levischuck/tiny-cbor';
@@ -92,21 +93,41 @@ assert.equal((await post('configure-tailnet', {
 })).status, 403);
 assert.deepEqual(await (await post('configure-tailnet', { ...oauth, token: setupToken })).json(), { configured: true });
 const setupResult = await (await post('prepare-host', { token: setupToken })).json();
-assert.deepEqual(Object.keys(setupResult).sort(), ['deviceTag', 'installCommand', 'state']);
+assert.deepEqual(Object.keys(setupResult).sort(), ['deviceTag', 'devices', 'installCommand', 'state']);
 assert.equal(setupResult.deviceTag, 'tag:openbot-probe');
 assert.equal(setupResult.state, 'connected');
 assert.match(setupResult.installCommand, /restrict,command=/);
 assert.doesNotMatch(setupResult.installCommand, /PRIVATE KEY|tskey-auth-/u);
-const hostPin = 'SHA256:' + 'A'.repeat(43);
-assert.equal((await post('save-host', { token: mcpToken, address: '100.64.0.2', fingerprint: hostPin })).status, 403);
-assert.equal((await post('save-host', { token: setupToken, address: '127.0.0.1', fingerprint: hostPin })).status, 403);
-assert.equal((await post('save-host', { token: setupToken, address: '100.64.0.2', fingerprint: 'none' })).status, 403);
-const hostSetup = await (await post('save-host', { token: setupToken, address: '100.64.0.2', fingerprint: hostPin })).json();
+assert.deepEqual(setupResult.devices, [{ name: 'Example host', address: '100.64.0.2' }]);
+const address = setupResult.devices[0].address;
+const { pinned: hostPin } = await (await fetch(fixture + '/attempts')).json();
+assert.equal((await post('begin-host-pairing', { token: mcpToken, address })).status, 403);
+assert.equal((await post('begin-host-pairing', { token: setupToken, address: '127.0.0.1' })).status, 403);
+const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
+assert.match(pair.installCommand, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
+execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
+const callbackToken = pair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+function hostCallback(token, fingerprint) {
+  return fetch(origin + '/passkeys/host-pairing', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token },
+    body: new URLSearchParams({ fingerprint }),
+  });
+}
+assert.equal((await hostCallback(mcpToken, hostPin)).status, 403);
+assert.equal((await hostCallback(callbackToken, 'invalid')).status, 403);
+assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json(),
+  { state: 'waiting_for_host' });
+assert.equal((await hostCallback(callbackToken, hostPin)).status, 200);
+assert.equal((await hostCallback(callbackToken, hostPin)).status, 403);
+assert.equal((await post('finish-host-pairing', { token: mcpToken, id: pair.id })).status, 403);
+const hostSetup = await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json();
 assert.equal(hostSetup.state, 'pending');
+assert.equal(hostSetup.host, address);
+assert.equal(hostSetup.fingerprint, hostPin);
 assert.equal(hostSetup.executed, false);
-assert.equal((await post('save-host', { token: setupToken, address: '100.64.0.3', fingerprint: hostPin })).status, 403);
+assert.equal((await post('begin-host-pairing', { token: setupToken, address: '100.64.0.3' })).status, 403);
 assert.equal(await attempts(), 0);
-console.log('PASS: owner setup emits a public key installation command and pins the host before review');
+console.log('PASS: owner device picker and one-time host callback pin the selected host before review');
 
 const pending = await call('start_passkey_test', job);
 assert.equal(pending.state, 'pending');

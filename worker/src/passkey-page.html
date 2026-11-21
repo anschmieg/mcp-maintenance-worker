@@ -12,7 +12,7 @@
     <h2>One-time tailnet setup</h2>
     <ol>
       <li>In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, add this tag under <code>tagOwners</code>. Keep the rest of your policy and check that broad rules do not grant the new tag unintended access.</li>
-      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential</strong>, then <strong>OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> only and select <code>tag:openbot-probe</code>. Select <strong>Generate credential</strong>.</li>
+      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential → OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> and select <code>tag:openbot-probe</code>. For the device picker, select <strong>Read</strong> for <strong>Devices Core</strong>. Select <strong>Generate credential</strong>.</li>
       <li>Paste the client ID and secret below, then select <strong>Connect with OAuth</strong>.</li>
     </ol>
     <textarea id="tailnet-policy" rows="5" cols="48" readonly aria-label="Tailnet tag policy snippet"></textarea>
@@ -20,15 +20,16 @@
     <p><label>OAuth client secret <input id="oauth-secret" type="password" autocomplete="off"></label></p>
   </section>
   <p id="pending-device" hidden><a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Open Tailscale Machines</a></p>
-  <textarea id="install-command" rows="8" cols="48" readonly hidden aria-label="Host installation command"></textarea>
   <div id="host-settings" hidden>
-    <p><label>Host Tailscale IPv4 address <input id="address" autocomplete="off"></label> <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Find it in Machines</a></p>
+    <p id="device-picker" hidden><label>Tailscale device <select id="device"><option value="">Enter address instead</option></select></label></p>
+    <p id="manual-address"><label>Host Tailscale IPv4 address <input id="address" autocomplete="off"></label> <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Find it in Machines</a></p>
     <div id="host-grant" hidden>
-      <p>Add this grant in <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a> to allow SSH to this host.</p>
+      <p>If SSH access is not already allowed for the probe, add this grant in <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>.</p>
       <textarea id="grant-policy" rows="8" cols="48" readonly aria-label="Host SSH grant snippet"></textarea>
     </div>
-    <p><label>SSH host key fingerprint <input id="fingerprint" autocomplete="off"></label></p>
   </div>
+  <textarea id="install-command" rows="8" cols="48" readonly hidden aria-label="Host installation command"></textarea>
+  <p><button id="copy-install" hidden>Copy host command</button></p>
   <p><button id="action" disabled>Continue</button></p>
   <p id="status" role="status"></p>
 </main>

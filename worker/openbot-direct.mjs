@@ -33,7 +33,7 @@ for (const [name, description, inputSchema = { job_id: z.string().uuid() }] of [
   ['start_passkey_test', 'Start a fixed dry-run approval. Present the returned review URL to the owner. No host action runs.'],
   ['passkey_test_status', 'Check a passkey dry run or host enrollment using its original job UUID.'],
   ['start_host_enrollment', 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic. Present the review URL to the owner.'],
-  ['maintenance_host_status', 'Read the last completed enrollment check for ams.', {}],
+  ['maintenance_host_status', 'Read the last completed check for the enrolled SSH host.', {}],
 ]) {
   server.registerTool(name, { description, inputSchema }, async (args, extra) => {
     const client = new Client({ name: 'openbot-direct-mcp-adapter', version: '0.1.0' });

@@ -51,7 +51,7 @@ export class MaintenanceAgent extends McpAgent<Env> {
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id, true)));
       this.server.registerTool('maintenance_host_status', {
-        description: 'Read the last completed enrollment check for ams.',
+        description: 'Read the last completed check for the enrolled SSH host.',
         inputSchema: {},
       }, async () => result(await approvalStore(this.env).hostStatus()));
     }

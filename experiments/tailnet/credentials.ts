@@ -8,26 +8,33 @@ export function oauthConfigured(env: OAuthSettings) {
     /^tag:[a-z][a-z0-9-]*$/u.test(env.TS_DEVICE_TAG ?? ''));
 }
 
-export async function mintTaggedAuthKey(env: OAuthSettings, request = fetch) {
-  if (!oauthConfigured(env)) throw new Error('Tagged Tailscale OAuth is not configured');
-  const tag = env.TS_DEVICE_TAG!;
+async function accessToken(env: OAuthSettings, scope: string, request: typeof fetch, tags?: string) {
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials', client_id: env.TS_OAUTH_CLIENT_ID!,
+    client_secret: env.TS_OAUTH_CLIENT_SECRET!, scope,
+  });
+  if (tags) body.set('tags', tags);
   const token = await request(api + 'oauth/token', {
     method: 'POST',
     redirect: 'error',
     signal: AbortSignal.timeout(5000),
-    body: new URLSearchParams({
-      grant_type: 'client_credentials', client_id: env.TS_OAUTH_CLIENT_ID!,
-      client_secret: env.TS_OAUTH_CLIENT_SECRET!, scope: 'auth_keys', tags: tag,
-    }),
+    body,
   });
   if (!token.ok) throw new Error('Tailscale OAuth exchange failed');
   const { access_token } = await token.json() as { access_token?: string };
   if (!access_token) throw new Error('Tailscale OAuth returned no token');
+  return access_token;
+}
+
+export async function mintTaggedAuthKey(env: OAuthSettings, request = fetch) {
+  if (!oauthConfigured(env)) throw new Error('Tagged Tailscale OAuth is not configured');
+  const tag = env.TS_DEVICE_TAG!;
+  const token = await accessToken(env, 'auth_keys', request, tag);
   const result = await request(api + 'tailnet/-/keys', {
     method: 'POST',
     redirect: 'error',
     signal: AbortSignal.timeout(5000),
-    headers: { Authorization: 'Bearer ' + access_token, 'Content-Type': 'application/json' },
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       capabilities: { devices: { create: { ephemeral: false, reusable: false, preauthorized: false, tags: [tag] } } },
       expirySeconds: 86_400,
@@ -37,6 +44,26 @@ export async function mintTaggedAuthKey(env: OAuthSettings, request = fetch) {
   const { key } = await result.json() as { key?: string };
   if (!key?.startsWith('tskey-auth-')) throw new Error('Tailscale returned no enrollment key');
   return key;
+}
+
+export type TailnetDevice = { name: string; address: string };
+
+export async function listTailnetDevices(env: OAuthSettings, request = fetch): Promise<TailnetDevice[]> {
+  const token = await accessToken(env, 'devices:core:read', request);
+  const result = await request(api + 'tailnet/-/devices', {
+    redirect: 'error', signal: AbortSignal.timeout(5000), headers: { Authorization: 'Bearer ' + token },
+  });
+  if (!result.ok) throw new Error('Tailscale device listing failed');
+  const { devices } = await result.json() as { devices?: Array<{ hostname?: string; addresses?: string[] }> };
+  const choices = new Map<string, TailnetDevice>();
+  for (const device of devices ?? []) {
+    const address = device.addresses?.find(validTailnetIpv4);
+    if (!address) continue;
+    const name = typeof device.hostname === 'string' ? device.hostname.slice(0, 120) : address;
+    choices.set(address, { name: name || address, address });
+    if (choices.size === 100) break;
+  }
+  return [...choices.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function generateSshKey() {
@@ -69,17 +96,20 @@ export function hostInstallCommand(publicKey: string) {
     'test "$(id -un)" = openbot-tailnet-probe && umask 077 && mkdir -p "$HOME/.ssh" &&',
     '  chmod 700 "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" &&',
     "  key='" + line + "' &&",
-    '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "%s\\n" "$key" >> "$HOME/.ssh/authorized_keys") &&',
-    '  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub',
+    '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "%s\\n" "$key" >> "$HOME/.ssh/authorized_keys")',
   ].join('\n');
 }
 
 export type Host = { address: string; fingerprint: string };
 
-export function validEnrollmentHost(host: Host) {
-  const octets = host.address.split('.');
+export function validTailnetIpv4(address: string) {
+  if (typeof address !== 'string') return false;
+  const octets = address.split('.');
   return octets.length === 4 &&
     octets.every(octet => /^(0|[1-9][0-9]{0,2})$/u.test(octet) && Number(octet) <= 255) &&
-    octets[0] === '100' && Number(octets[1]) >= 64 && Number(octets[1]) <= 127 &&
-    /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
+    octets[0] === '100' && Number(octets[1]) >= 64 && Number(octets[1]) <= 127;
+}
+
+export function validEnrollmentHost(host: Host) {
+  return validTailnetIpv4(host.address) && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(host.fingerprint);
 }

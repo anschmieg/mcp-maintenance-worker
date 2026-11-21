@@ -70,29 +70,68 @@ function hostSetup(token) {
       return;
     }
     title.textContent = 'Add the pilot host';
-    details.textContent = 'Create the dedicated account openbot-tailnet-probe on ams. Run this command from that account, then enter its Tailscale IPv4 address and the SHA256 fingerprint printed by the command.';
+    details.textContent = 'Choose the host you want to enroll.';
     const command = document.querySelector('#install-command');
-    command.value = result.installCommand;
-    command.hidden = false;
     const address = document.querySelector('#address');
+    const picker = document.querySelector('#device');
+    for (const device of result.devices ?? []) {
+      const option = document.createElement('option');
+      option.value = device.address;
+      option.textContent = device.name + ' · ' + device.address;
+      picker.append(option);
+    }
+    document.querySelector('#device-picker').hidden = !result.devices?.length;
+    const targetAddress = () => picker.value || address.value.trim();
+    let updateGrant = () => {};
     if (result.deviceTag) {
       const grant = document.querySelector('#grant-policy');
-      const updateGrant = () => {
+      updateGrant = () => {
         grant.value = JSON.stringify({
-          grants: [{ src: [result.deviceTag], dst: [address.value.trim() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
+          grants: [{ src: [result.deviceTag], dst: [targetAddress() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
         }, null, 2);
       };
       address.oninput = updateGrant;
       updateGrant();
       document.querySelector('#host-grant').hidden = false;
     }
+    picker.onchange = () => {
+      document.querySelector('#manual-address').hidden = Boolean(picker.value);
+      updateGrant();
+    };
     document.querySelector('#host-settings').hidden = false;
-    bind('Save host and review check', async () => {
-      const fingerprint = document.querySelector('#fingerprint').value.trim();
-      const job = await post('save-host', { token, address: address.value.trim(), fingerprint });
-      if (!job.review_url) throw new Error('Review unavailable');
-      location.assign(job.review_url);
-    }, 'The address or fingerprint could not be saved. Check both values. The pilot host cannot be changed after it is saved.');
+    bind('Get host setup command', async () => {
+      const pair = await post('begin-host-pairing', { token, address: targetAddress() });
+      if (pair.installCommand) {
+        command.value = pair.installCommand;
+        command.hidden = false;
+        const copy = document.querySelector('#copy-install');
+        copy.hidden = false;
+        copy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(command.value);
+            copy.textContent = 'Copied';
+          } catch {
+            command.select();
+          }
+        };
+        details.textContent = 'Run this command on the selected host as the dedicated SSH account openbot-tailnet-probe. It installs the public key and sends the host fingerprint back here.';
+      }
+      document.querySelector('#host-settings').hidden = true;
+      status.textContent = 'Waiting for the host…';
+      for (let attempt = 0; attempt < 180; attempt++) {
+        const job = await post('finish-host-pairing', { token, id: pair.id });
+        if (job.review_url) {
+          location.assign(job.review_url);
+          return;
+        }
+        if (job.state !== 'waiting_for_host') {
+          status.textContent = 'Host check status: ' + job.state + '.';
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+      throw new Error('Pairing expired');
+    }, 'Host setup did not complete. Reload the page to retry.');
   }
   bind('Connect Tailscale', connect, 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.');
 }

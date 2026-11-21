@@ -1,10 +1,11 @@
 import { TailnetObject, Tailnet } from './src/index.js';
 import { runEnrollmentCheck } from './ssh-check';
-import { generateSshKey, mintTaggedAuthKey, oauthConfigured, hostInstallCommand, validEnrollmentHost, guidedTag, type Host } from './credentials';
+import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, guidedTag, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 type Key = Awaited<ReturnType<typeof generateSshKey>>;
 type GuidedJoin = { authKey?: string };
+type Inventory = { devices: TailnetDevice[]; expires: number };
 
 export class HostVerifier extends WorkerEntrypoint {
   #node() { return this.env.NODE.getByName('ams-probe'); }
@@ -21,7 +22,7 @@ export class HostVerifier extends WorkerEntrypoint {
     return this.#node().saveEnrollmentHost(host);
   }
 
-  async runAmsEnrollmentCheck() {
+  async runHostEnrollmentCheck() {
     return this.#node().runEnrollmentCheck();
   }
 }
@@ -42,11 +43,18 @@ export class ProbeNode extends TailnetObject {
   async #configureTailnet(clientId: string, clientSecret: string) {
     if (await this.ctx.storage.get<GuidedJoin>('guided-tailnet-join')) return true;
     if (oauthConfigured(this.env) || this.env.TS_AUTHKEY) return false;
-    const authKey = await mintTaggedAuthKey({
+    const settings = {
       TS_OAUTH_CLIENT_ID: clientId, TS_OAUTH_CLIENT_SECRET: clientSecret, TS_DEVICE_TAG: guidedTag,
-    }).catch(() => null);
+    };
+    const [authKey, devices] = await Promise.all([
+      mintTaggedAuthKey(settings).catch(() => null),
+      listTailnetDevices(settings).catch(() => []),
+    ]);
     if (!authKey) return false;
-    await this.ctx.storage.put<GuidedJoin>('guided-tailnet-join', { authKey });
+    await this.ctx.storage.put({
+      'guided-tailnet-join': { authKey },
+      'setup-inventory': { devices, expires: Date.now() + 15 * 60_000 },
+    });
     return true;
   }
 
@@ -96,7 +104,12 @@ export class ProbeNode extends TailnetObject {
       return candidate;
     });
     const connected = await this.#readyTailnet().then(() => true, () => false);
-    return { state: connected ? 'connected' : 'tailnet_pending', installCommand: hostInstallCommand(key.publicKey), deviceTag };
+    const inventory = await this.ctx.storage.get<Inventory>('setup-inventory');
+    if (inventory && inventory.expires <= Date.now()) await this.ctx.storage.delete('setup-inventory');
+    return {
+      state: connected ? 'connected' : 'tailnet_pending', installCommand: hostInstallCommand(key.publicKey), deviceTag,
+      devices: inventory && inventory.expires > Date.now() ? inventory.devices : [],
+    };
   }
 
   async saveEnrollmentHost(host: Host) {
@@ -106,6 +119,7 @@ export class ProbeNode extends TailnetObject {
       if (current) return current.address === host.address && current.fingerprint === host.fingerprint;
       if (!await tx.get('enrollment-ssh-key')) return false;
       await tx.put('enrollment-host', host);
+      await tx.delete('setup-inventory');
       return true;
     });
   }

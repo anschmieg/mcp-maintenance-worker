@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, validEnrollmentHost,
+  enrollmentCommand, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -47,6 +47,20 @@ assert.deepEqual(keyRequest.capabilities.devices.create, {
   ephemeral: false, reusable: false, preauthorized: false, tags: ['tag:openbot-probe'],
 });
 const pinned = 'SHA256:' + createHash('sha256').update(host.publicKey).digest('base64').replace(/=$/, '');
+const devices = await listTailnetDevices({
+  TS_OAUTH_CLIENT_ID: 'example-id', TS_OAUTH_CLIENT_SECRET: 'example-secret',
+}, async (_url, options) => {
+  if (options.method === 'POST') {
+    assert.equal(options.body.get('scope'), 'devices:core:read');
+    assert.equal(options.body.has('tags'), false);
+    return Response.json({ access_token: 'test-read-token' });
+  }
+  return Response.json({ devices: [
+    { hostname: 'Example host', addresses: ['fd7a:115c:a1e0::1', '100.64.0.2'], user: 'should not appear' },
+    { hostname: 'Not in the tailnet', addresses: ['127.0.0.1'] },
+  ] });
+});
+assert.deepEqual(devices, [{ name: 'Example host', address: '100.64.0.2' }]);
 let mode = 'normal';
 let attempts = 0;
 let enrolled;
@@ -77,14 +91,14 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
 await new Promise(resolve => ssh.listen(0, '127.0.0.1', resolve));
 createServer((request, response) => {
   if (request.url === '/fixture') {
-    const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : pinned;
+    const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : enrolled?.fingerprint;
     response.setHeader('X-Fixture-Mode', mode);
     response.end(JSON.stringify({
       port: ssh.address().port, fingerprint, privateKey: client.privateKey, interrupt: mode === 'interrupted',
     }));
   } else if (request.url === '/prepare') {
     response.end(JSON.stringify(tailnetConfigured
-      ? { state: 'connected', installCommand, deviceTag: 'tag:openbot-probe' }
+      ? { state: 'connected', installCommand, deviceTag: 'tag:openbot-probe', devices }
       : { state: 'unconfigured' }));
   } else if (request.url === '/oauth' && request.method === 'POST') {
     let body = '';
@@ -109,6 +123,6 @@ createServer((request, response) => {
     mode = request.url.slice('/mode/'.length);
     response.end();
   } else {
-    response.end(JSON.stringify({ attempts }));
+    response.end(JSON.stringify({ attempts, pinned }));
   }
 }).listen(8796, '127.0.0.1');

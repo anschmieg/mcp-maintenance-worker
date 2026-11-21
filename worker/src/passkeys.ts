@@ -7,6 +7,7 @@ import {
 } from '@simplewebauthn/server';
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
+import { validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
@@ -20,7 +21,7 @@ type HostResult =
   | { state: 'diagnostic_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | typeof hostCheck;
+  target: typeof diagnostic | (typeof hostCheck & { fingerprint?: string });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
   approved_at?: number;
@@ -29,14 +30,18 @@ type Job = {
   host_result?: HostResult;
 };
 type Enrollment = { challenge: string; expires: number };
+type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string };
+const pairingLifetime = 15 * 60_000;
+const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
+const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 export type PasskeyEnv = {
   PASSKEYS: DurableObjectNamespace<PasskeyApproval>;
   PASSKEY_ORIGIN?: string;
   PASSKEY_SETUP_TOKEN?: string;
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
   HOST_PROBE?: {
-    runAmsEnrollmentCheck(): Promise<HostResult>;
-    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string }>;
+    runHostEnrollmentCheck(): Promise<HostResult>;
+    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[] }>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: { address: string; fingerprint: string }): Promise<boolean>;
   };
@@ -115,10 +120,53 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return (await this.env.HOST_PROBE?.configureTailnet(clientId, clientSecret).catch(() => false)) ?? false;
   }
 
-  async saveHost(token: unknown, address: unknown, fingerprint: unknown) {
+  async beginPairing(token: unknown, address: unknown) {
     if (!setupAuthorized(this.env, token) || !await this.#credential() ||
-        typeof address !== 'string' || typeof fingerprint !== 'string') return false;
-    return (await this.env.HOST_PROBE?.saveEnrollmentHost({ address, fingerprint }).catch(() => false)) ?? false;
+        typeof address !== 'string' || !validTailnetIpv4(address)) return null;
+    const probe = await this.prepareHost(token);
+    if (probe?.state !== 'connected' || !('installCommand' in probe) || !probe.installCommand) return null;
+    const callbackToken = crypto.randomUUID() + crypto.randomUUID();
+    const id = crypto.randomUUID();
+    const pairing = await this.ctx.storage.transaction(async tx => {
+      const previous = await tx.get<Pairing>('pairing');
+      if (previous?.fingerprint) return previous.address === address ? previous : null;
+      if (await tx.get('onboarding-host')) return null;
+      const next = { id, address, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
+      await tx.put<Pairing>('pairing', next);
+      return next;
+    });
+    if (!pairing) return null;
+    if (pairing.fingerprint) return { id: pairing.id };
+    const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env)).href;
+    return {
+      id, installCommand: probe.installCommand + ' &&\n' +
+        '  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk \'{print $2}\') &&\n' +
+        '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
+        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url),
+    };
+  }
+
+  async receiveFingerprint(callbackToken: string, fingerprint: unknown) {
+    if (!/^[0-9a-f-]{72}$/u.test(callbackToken) ||
+        typeof fingerprint !== 'string' || !/^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)) return false;
+    return this.ctx.storage.transaction(async tx => {
+      const pair = await tx.get<Pairing>('pairing');
+      if (!pair || pair.fingerprint || pair.expires <= Date.now() || pair.tokenHash !== hashToken(callbackToken)) return false;
+      await tx.put<Pairing>('pairing', { ...pair, fingerprint, tokenHash: '' });
+      return true;
+    });
+  }
+
+  async finishPairing(token: unknown, id: unknown) {
+    if (!setupAuthorized(this.env, token) || typeof id !== 'string') return null;
+    const pair = await this.ctx.storage.get<Pairing>('pairing');
+    if (pair?.id !== id) return null;
+    if (!pair.fingerprint) return pair.expires > Date.now() ? { state: 'waiting_for_host' } : null;
+    const host = { address: pair.address, fingerprint: pair.fingerprint };
+    const saved = await this.env.HOST_PROBE?.saveEnrollmentHost(host).catch(() => false);
+    if (!saved) return null;
+    await this.ctx.storage.put<Host>('onboarding-host', host);
+    return this.start(id, true);
   }
 
   async start(jobId: string, enrollment = false) {
@@ -126,7 +174,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const credential = await this.#credential();
     if (!credential) return { state: 'enrollment_required', ...empty };
     const key = 'job:' + jobId;
-    const target = enrollment ? hostCheck : diagnostic;
+    const host = enrollment ? await this.ctx.storage.get<Host>('onboarding-host') : undefined;
+    if (enrollment && !host) return { state: 'host_setup_required', ...empty };
+    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint } : diagnostic;
     const options = await generateAuthenticationOptions({
       rpID: origin.hostname, userVerification: 'required',
       allowCredentials: [{ id: credential.id, transports: credential.transports }],
@@ -202,7 +252,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async #verifyHost(key: string) {
     const result: HostResult = this.env.HOST_PROBE
-      ? await this.env.HOST_PROBE.runAmsEnrollmentCheck().catch(() => ({ state: 'check_outcome_unknown', executed: null }))
+      ? await this.env.HOST_PROBE.runHostEnrollmentCheck().catch(() => ({ state: 'check_outcome_unknown', executed: null }))
       : { state: 'unconfigured', executed: false };
     await this.ctx.storage.transaction(async tx => {
       const job = await tx.get<Job>(key);
@@ -243,9 +293,18 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return reject(404);
   }
   if (request.method !== 'POST') return reject(405);
-  if (request.headers.get('Origin') !== origin.origin) return reject(403);
   const length = request.headers.get('Content-Length');
   if (!length || !/^\d{1,6}$/.test(length) || Number(length) > 32768) return reject(413);
+  if (path === '/host-pairing') {
+    const auth = request.headers.get('Authorization') ?? '';
+    const mediaType = request.headers.get('Content-Type')?.split(';', 1)[0].trim();
+    if (!auth.startsWith('Bearer ') || Number(length) > 1024 ||
+        mediaType !== 'application/x-www-form-urlencoded') return reject(403);
+    const form = new URLSearchParams(await request.text());
+    return await store.receiveFingerprint(auth.slice(7), form.get('fingerprint'))
+      ? new Response('Host fingerprint received.\n', { headers }) : reject(403);
+  }
+  if (request.headers.get('Origin') !== origin.origin) return reject(403);
   if (request.headers.get('Content-Type') !== 'application/json') return reject(415);
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(400);
@@ -265,9 +324,13 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     const connected = await store.configureTailnet(body.token, body.clientId, body.clientSecret);
     return connected ? reply({ configured: true }) : reject(403);
   }
-  if (path === '/save-host') {
-    const saved = await store.saveHost(body.token, body.address, body.fingerprint);
-    return saved ? reply(await store.start(crypto.randomUUID(), true)) : reject(403);
+  if (path === '/begin-host-pairing') {
+    const pair = await store.beginPairing(body.token, body.address);
+    return pair ? reply(pair) : reject(403);
+  }
+  if (path === '/finish-host-pairing') {
+    const result = await store.finishPairing(body.token, body.id);
+    return result ? reply(result) : reject(403);
   }
   if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
   if (path === '/review-options') {
