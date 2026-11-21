@@ -171,15 +171,15 @@ assert.match(install, /account='pasta-mcp'/u);
 assert.match(install, /useradd --system --create-home/u);
 assert.ok(install.includes('read -r answer <&3'));
 assert.match(install, /Show what setup installs/u);
-assert.match(install, /Choice \[3\]/u);
+assert.match(install, /Choice \[4\]/u);
 assert.ok(install.includes('runuser -u "$account"'));
 assert.match(install, /tailscale ip -4/u);
 execFileSync('/bin/sh', ['-n', '-c', install]);
 const callbackToken = pair.download.token;
-function hostCallback(token, fingerprint, pairing = pair.id, action = 'created') {
+function hostCallback(token, fingerprint, pairing = pair.id, action = 'created', account) {
   return fetch(origin + '/passkeys/host-pairing?pair=' + pairing, {
     method: 'POST', headers: { Authorization: 'Bearer ' + token },
-    body: new URLSearchParams({ fingerprint, account_action: action }),
+    body: new URLSearchParams({ fingerprint, account_action: action, ...(account === undefined ? {} : { account }) }),
   });
 }
 assert.equal((await hostCallback(mcpToken, hostPin)).status, 403);
@@ -400,11 +400,19 @@ assert.equal(claim.status, 200);
 const detectedInstaller = await claim.text();
 assert.match(detectedInstaller, /target_address='100\.64\.0\.4'/u);
 assert.match(detectedInstaller, /target_name='Auto host'/u);
+assert.match(detectedInstaller, /Use an existing login account/u);
 execFileSync('/bin/sh', ['-n', '-c', detectedInstaller]);
 assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json(),
   { state: 'waiting_for_confirmation', host: 'Auto host' });
 await fetch(fixture + '/mode/wrong-pin', { method: 'POST' });
-assert.equal((await hostCallback(detectedPair.download.token, hostPin, detectedPair.id)).status, 200);
+const detectedToken = detectedPair.download.token;
+const existingAccount = 'ops-admin';
+for (const account of [undefined, 'root', '../operator', 'ops-admin\n', 'ops;admin']) {
+  assert.equal((await hostCallback(detectedToken, hostPin, detectedPair.id, 'existing', account)).status, 403);
+}
+assert.equal((await hostCallback(detectedToken, hostPin, detectedPair.id, 'reused', existingAccount)).status, 403);
+assert.equal((await hostCallback(detectedToken, hostPin, detectedPair.id, 'existing', existingAccount)).status, 200);
+assert.equal((await hostCallback(detectedToken, hostPin, detectedPair.id, 'existing', 'different-admin')).status, 403);
 async function finishDetectedPair(retry = false) {
   let status = await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id, retry })).json();
   for (let attempt = 0; status.state === 'verifying' && attempt < 60; attempt++) {
@@ -430,13 +438,32 @@ assert.notEqual(secondAuto.id, detectedPair.id);
 assert.equal((await claimHost(detectedAddress, secondAuto)).status, 409);
 console.log('PASS: passkey resume, host detection, rejection of invisible devices, verification retry, and repeat pairing');
 
+const existingRestart = randomUUID();
+const initialRestarts = (await (await fetch(fixture + '/attempts')).json()).restarts;
+const existingRequest = await call('request_service_restart', existingRestart, detectedAddress);
+assert.equal(existingRequest.state, 'pending');
+assert.equal(existingRequest.execution_identity, existingAccount);
+assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, initialRestarts);
+assert.equal((await post('approve', { job: existingRestart, response: restartApproval })).status, 409);
+const existingReview = await (await post('review-options', { job: existingRestart })).json();
+const existingApproval = assertion(0x05, origin, existingReview.options.challenge);
+assert.equal((await post('approve', { job: existingRestart, response: existingApproval })).status, 200);
+assert.equal((await post('approve', { job: existingRestart, response: existingApproval })).status, 409);
+for (let retry = 0; retry < 60; retry++) {
+  if ((await call('passkey_test_status', existingRestart)).state !== 'checking_host') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal((await call('passkey_test_status', existingRestart)).state, 'service_restarted');
+assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, initialRestarts + 1);
+console.log('PASS: selected existing account is bound to SSH and a fresh one-time restart approval');
+
+const count = await attempts() + 1;
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
 await call('start_host_enrollment', hostJob, address);
 const hostReview = await (await post('review-options', { job: hostJob })).json();
 const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
 assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 200);
-const count = beforeExpiry + 4;
 for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
   await new Promise(resolve => setTimeout(resolve, 100));
 }

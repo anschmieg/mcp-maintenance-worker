@@ -2,11 +2,11 @@ const api = 'https://api.tailscale.com/api/v2/';
 export const maintenanceAccount = 'pasta-mcp';
 export const legacyAccount = 'openbot-tailnet-probe';
 export const tailnetHostname = 'pasta-mcp-worker';
-const hostAccounts = [maintenanceAccount, 'maintenance-relay', legacyAccount] as const;
-export type HostAccount = typeof hostAccounts[number];
+export type HostAccount = string;
 
 export function isHostAccount(value: unknown): value is HostAccount {
-  return hostAccounts.some(account => account === value);
+  return typeof value === 'string' && value !== 'root' && /^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$/u.test(value) &&
+    !/\s/u.test(value);
 }
 
 export const guidedTag = 'tag:openbot-probe';
@@ -92,10 +92,10 @@ export function hostInstallCommand(publicKey: string, account: HostAccount = mai
   const escaped = forcedCommand.replace(/["\\]/gu, '\\$&');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
-    'test "$(id -un)" = ' + account + ' && umask 077 && mkdir -p "$HOME/.ssh" &&',
+    'test "$(id -un)" = "${1:-' + account + '}" && umask 077 && mkdir -p "$HOME/.ssh" &&',
     '  chmod 700 "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" &&',
     "  key='" + line + "' &&",
-    '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "%s\\n" "$key" >> "$HOME/.ssh/authorized_keys")',
+    '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "\\n%s\\n" "$key" >> "$HOME/.ssh/authorized_keys")',
   ].join('\n');
 }
 

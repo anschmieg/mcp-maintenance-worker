@@ -10,7 +10,7 @@ import approvalPage from './passkey-page.html';
 import approvalStyles from './passkey-page.css';
 import pairingInstaller from './pairing-install.sh';
 import pairingDetector from './pairing-detect.sh';
-import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { sameEnrollmentHost, isHostAccount, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
@@ -36,7 +36,7 @@ type Job = {
 };
 type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
-type Pairing = { automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'canceled' };
+type Pairing = { automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
 const pairingLifetime = 15 * 60_000;
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -386,7 +386,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
   }
 
-  async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown, accountAction: unknown) {
+  async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown, accountAction: unknown, selectedAccount: unknown) {
     if ((id !== null && !uuid.test(id)) || !/^[0-9a-f-]{72}$/u.test(callbackToken)) return false;
     const canceled = accountAction === 'canceled';
     const candidateFingerprint = typeof fingerprint === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)
@@ -400,10 +400,15 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         await tx.put<Pairing>(slot, { ...pair, accountAction: 'canceled', tokenHash: '' });
         return true;
       }
-      if (pair.account && accountAction !== 'created' && accountAction !== 'reused') return false;
+      const dedicated = accountAction === 'created' || accountAction === 'reused';
+      const existing = accountAction === 'existing' && isHostAccount(selectedAccount);
+      if (accountAction === 'existing' && !existing) return false;
+      if (!existing && selectedAccount !== null && selectedAccount !== pair.account) return false;
+      if (pair.account && !dedicated && !existing) return false;
       await tx.put<Pairing>(slot, {
         ...pair, fingerprint: candidateFingerprint, tokenHash: '', receiptHash: pair.automatic ? pair.tokenHash : undefined,
-        accountAction: accountAction === 'created' || accountAction === 'reused' ? accountAction : undefined,
+        account: existing ? selectedAccount : pair.account,
+        accountAction: dedicated || existing ? accountAction : undefined,
       });
       return true;
     });
@@ -550,7 +555,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return {
       job_id: jobId, host, operation, execution_identity, dry_run,
       ...(!job.target.dry_run ? { fingerprint: job.target.fingerprint } : {}),
-      ...(operation === restartOperation ? { service: restartUnit, run_as: 'root via a single sudo rule' } : {}), expires_at: job.expires_at,
+      ...(operation === restartOperation ? { service: restartUnit, run_as: 'root via sudo' } : {}), expires_at: job.expires_at,
       ...job.host_result,
       executed: job.host_result ? job.host_result.executed : (
         job.approved_at && !job.target.dry_run ? null : false
@@ -709,7 +714,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (!auth.startsWith('Bearer ') || Number(length) > 1024 ||
         mediaType !== 'application/x-www-form-urlencoded') return reject(403);
     const form = new URLSearchParams(await request.text());
-    return await store.receiveFingerprint(url.searchParams.get('pair'), auth.slice(7), form.get('fingerprint'), form.get('account_action'))
+    return await store.receiveFingerprint(url.searchParams.get('pair'), auth.slice(7), form.get('fingerprint'), form.get('account_action'), form.get('account'))
       ? new Response(form.get('account_action') === 'canceled' ? 'Pairing canceled.\n' : 'Host fingerprint received.\n', { headers })
       : reject(403);
   }

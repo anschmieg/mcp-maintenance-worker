@@ -31,7 +31,7 @@ pair_host() {
   fi
 
   printf '\n  %sPaSTA  /  Pair a host%s\n\n' "$accent" "$reset" >&3
-  printf '  Host      %s (%s)\n  Account   %s\n\n' "$target_name" "$target_address" "$account" >&3
+  printf '  Host  %s (%s)\n\n' "$target_name" "$target_address" >&3
 
   if ! tailscale ip -4 | grep -Fxq -- "$target_address"; then
     note 'This machine does not match the selected Tailscale address.'
@@ -47,32 +47,54 @@ pair_host() {
       ;;
   esac
 
-  if account_uid=$(id -u "$account" 2>/dev/null); then
-    if [ "$account_uid" = 0 ]; then
-      note 'The dedicated account must be unprivileged.'
-      return 1
-    fi
-    account_action=reused
-    primary='Pair using the existing account'
-  else
-    account_action=created
-    primary='Create the dedicated account and pair'
-  fi
-
   while :; do
-    printf '  %s1%s  %s\n  2  Show what setup installs\n  3  Cancel\n\n  Choice [3]: ' \
-      "$accent" "$reset" "$primary" >&3
+    printf '  %s1%s  Use the dedicated %s account (create if needed)\n' "$accent" "$reset" "$account" >&3
+    printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [4]: ' >&3
     if ! IFS= read -r answer <&3; then answer=''; fi
     case "$answer" in
-      1) break ;;
+      1)
+        if account_uid=$(id -u "$account" 2>/dev/null); then
+          if [ "$account_uid" = 0 ]; then
+            note 'The dedicated account must have a nonzero user ID.'
+            continue
+          fi
+          account_action=reused
+        else
+          account_action=created
+        fi
+        break
+        ;;
       2)
+        printf '\n  Existing login name (Enter to go back): ' >&3
+        if ! IFS= read -r selected_account <&3 || [ -z "$selected_account" ]; then continue; fi
+        case "$selected_account" in
+          root|[!a-zA-Z_]*|*[!a-zA-Z0-9_.-]*)
+            note 'Enter a valid non-root login name.'
+            continue
+            ;;
+        esac
+        if [ "${#selected_account}" -gt 32 ] ||
+           ! account_uid=$(id -u "$selected_account" 2>/dev/null) || [ "$account_uid" = 0 ]; then
+          note 'Choose an existing login with a nonzero user ID.'
+          continue
+        fi
+        printf '  Install the restricted PaSTA SSH key for %s? [y/N] ' "$selected_account" >&3
+        if ! IFS= read -r confirm <&3; then continue; fi
+        case "$confirm" in y|Y|yes|YES) ;; *) continue ;; esac
+        account="$selected_account"
+        account_action=existing
+        break
+        ;;
+      3)
         printf '\n' >&3
-        note 'PaSTA installs one restricted SSH key for the dedicated account.'
+        note 'PaSTA installs one restricted SSH key for the account you choose.'
+        note 'The key allows only the pairing check and the fixed maintenance operation.'
+        note 'Maintenance needs passkey approval and uses the account’s existing sudo policy.'
         note 'It sends this machine’s SSH fingerprint to the setup page.'
         note 'PaSTA checks the restricted SSH connection before adding the host.'
         printf '\n' >&3
         ;;
-      ''|3)
+      ''|4)
         if notify_worker --data-urlencode 'account_action=canceled'; then
           note 'Pairing canceled. The setup page will update.'
         else
@@ -80,7 +102,7 @@ pair_host() {
         fi
         return 1
         ;;
-      *) note 'Enter 1, 2, or 3.' ;;
+      *) note 'Enter 1, 2, 3, or 4.' ;;
     esac
   done
 
@@ -93,11 +115,11 @@ pair_host() {
     fi
   fi
   note 'Installing the restricted SSH key…'
-  if ! runuser -u "$account" -- /bin/sh -c "$install_command"; then
+  if ! runuser -u "$account" -- /bin/sh -c "$install_command" pasta-install "$account"; then
     note 'Could not install the SSH key. Check the error above, then rerun the command.'
     return 1
   fi
-  if ! notify_worker --data-urlencode "fingerprint=$fingerprint" --data-urlencode "account_action=$account_action"; then
+  if ! notify_worker --data-urlencode "fingerprint=$fingerprint" --data-urlencode "account_action=$account_action" --data-urlencode "account=$account"; then
     note 'The setup page did not confirm receipt. Check the page before trying again.'
     return 1
   fi

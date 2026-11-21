@@ -139,7 +139,7 @@ function hostSetup(token) {
     pendingDevice.hidden = true;
     showStep('host');
     title.textContent = 'Add a host';
-    details.textContent = 'Run the setup command on the Linux machine you want to add. PaSTA will detect it over Tailscale.';
+    details.textContent = 'Run the setup command on the Linux machine you want to add. PaSTA detects it over Tailscale. Choose the SSH account in the terminal.';
     const command = document.querySelector('#install-command');
     const panel = document.querySelector('#pair-command');
     const copy = document.querySelector('#copy-install');
@@ -304,7 +304,7 @@ if (location.pathname.endsWith('/onboard')) {
       : request.dry_run ? 'Approve maintenance test' : 'Verify SSH enrollment';
     details.textContent = request.service
       ? 'Restart ' + request.service + ' once on ' + request.host + ' as ' + request.run_as +
-        '. The service may be briefly unavailable.'
+        ', using the SSH account ' + request.execution_identity + '. The service may be briefly unavailable.'
       : request.dry_run
       ? request.operation + ' on ' + request.host + ' as ' + request.execution_identity + '. This dry run will not connect to the host.'
       : 'Ask your host administrator to install the restricted SSH key for ' + request.execution_identity + ' on ' +

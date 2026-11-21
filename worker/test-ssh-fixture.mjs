@@ -56,10 +56,10 @@ assert.deepEqual(keyRequest.capabilities.devices.create, {
   ephemeral: false, reusable: false, preauthorized: false, tags: ['tag:openbot-probe'],
 });
 const pinned = 'SHA256:' + createHash('sha256').update(host.publicKey).digest('base64').replace(/=$/, '');
-for (const account of ['maintenance-relay', legacyAccount]) {
+for (const account of ['maintenance-relay', legacyAccount, 'ops-admin']) {
   const previous = { address: '100.64.0.2', fingerprint: pinned, account };
   assert.ok(validEnrollmentHost(previous));
-  assert.ok(hostInstallCommand(client.publicKey, account).includes('= ' + account + ' &&'));
+  assert.ok(hostInstallCommand(client.publicKey, account).includes('"${1:-' + account + '}"'));
   assert.ok(sameEnrollmentHost(previous, { ...previous }));
   assert.ok(!sameEnrollmentHost(previous, { ...previous, account: 'pasta-mcp' }));
 }
@@ -75,9 +75,10 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
   connection.on('authentication', auth => {
     if (!isHostAccount(auth.username) || auth.method !== 'publickey') return auth.reject();
-    const clientPublic = [...clientKeys.values()].map(key => ssh2.utils.parseKey(key.publicKey))
-      .find(key => auth.key.data.equals(key.getPublicSSH()));
-    if (!clientPublic) return auth.reject();
+    const address = [...clientKeys].find(([, key]) =>
+      auth.key.data.equals(ssh2.utils.parseKey(key.publicKey).getPublicSSH()))?.[0];
+    if (!address || auth.username !== (enrolled.get(address)?.account ?? legacyAccount)) return auth.reject();
+    const clientPublic = ssh2.utils.parseKey(clientKeys.get(address).publicKey);
     if (auth.signature && clientPublic.verify(auth.blob, auth.signature, auth.hashAlgo) !== true) {
       return auth.reject();
     }

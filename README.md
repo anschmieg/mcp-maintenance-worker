@@ -76,7 +76,7 @@ Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes `/mcp`, `/passke
 
 1. Open `/passkeys/onboard` and enter the setup code to register the owner passkey. On later visits, select **Sign in with passkey**.
 2. Select **Sign in to Tailscale**. Open the Tailscale login link and add the `pasta-mcp-worker` device. If your tailnet requires device approval, approve the device in Tailscale **Machines**.
-3. Select **Get host setup command**. Run the one-line command in a Linux terminal on the machine you want to add. PaSTA checks whether the machine is visible on the connected tailnet, then the terminal shows its name and asks whether to create or use the dedicated `pasta-mcp` account. Select **1** to pair, **2** to see what setup installs, or **3** or Enter to cancel. The command needs sudo, Tailscale, OpenSSH Server, and curl on the host. Keep it private until pairing completes.
+3. Select **Get host setup command**. Run the one-line command in a Linux terminal on the machine you want to add. PaSTA checks whether the machine is visible on the connected tailnet, then the terminal shows its name. Select **1** to use the dedicated `pasta-mcp` account, **2** to choose an existing login, **3** to inspect what setup installs, or **4** or Enter to cancel. An existing login can have sudo privileges and must have a nonzero user ID. PaSTA asks before installing the key for that login and uses its existing sudo policy. The command needs sudo, Tailscale, OpenSSH Server, and curl on the host. Keep it private until pairing completes.
 4. PaSTA verifies the pinned host key and restricted SSH command during pairing. If verification fails, fix the reported issue and select **Retry SSH verification**. Select **Add another host** to generate the next command.
 
 After the owner registers, remove `PASSKEY_SETUP_TOKEN` if desired. Use the passkey to resume setup or remove enrolled hosts. Removal blocks new checks and deletes the Worker's private key. A check already running can finish. Remove the old public key from the host's `authorized_keys` file as well.
@@ -95,13 +95,13 @@ RemainAfterExit=yes
 ExecStart=/usr/bin/true
 ```
 
-Use `visudo` to install this rule under `/etc/sudoers.d/`. The SSH account should have only this sudo permission.
+The restart uses non-interactive sudo. If the selected account needs permission, use `visudo` to install this rule under `/etc/sudoers.d/`. Replace `pasta-mcp` with the enrolled login if you chose an existing account. The installer leaves sudo policy to the host administrator.
 
 ```sudoers
 pasta-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart openbot-maintenance-demo.service
 ```
 
-Enroll the host using the current wizard so its SSH key has the latest forced command. Existing enrollments keep their recorded SSH account. If you enable the restart for an existing enrollment, use that account in the sudo rule. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask your MCP client to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. Your MCP client can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
+PaSTA requires a fresh passkey approval for each restart. OpenSSH enforces the key’s fixed command allowlist on the host. Protect the Worker’s SSH private key, since a caller who obtains it could invoke those allowed commands directly within the host’s sudo policy. Enroll the host using the current wizard so its SSH key has the latest forced command. Existing enrollments keep their recorded SSH account. If you enable the restart for an existing enrollment, use that account in the sudo rule. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask your MCP client to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. Your MCP client can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
 
 ### Optional tagged enrollment
 
