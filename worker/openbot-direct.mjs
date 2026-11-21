@@ -33,6 +33,7 @@ for (const [name, description, inputSchema = { job_id: z.string().uuid() }] of [
   ['start_passkey_test', 'Start a fixed dry-run approval. Present the returned review URL to the owner. No host action runs.'],
   ['passkey_test_status', 'Check a passkey dry run or host enrollment using its original job UUID.'],
   ['start_host_enrollment', 'Request passkey approval for the fixed SSH check on an enrolled host. Use the host address when more than one host is enrolled. Present the review URL to the owner.', { job_id: z.string().uuid(), host: z.string().optional() }],
+  ['request_service_restart', 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. Present the review URL.', { job_id: z.string().uuid(), host: z.string() }],
   ['maintenance_host_status', 'Read the last completed SSH check, optionally for a specific enrolled host.', { host: z.string().optional() }],
   ['maintenance_hosts', 'List enrolled host addresses for selecting an SSH check target.', {}],
 ]) {

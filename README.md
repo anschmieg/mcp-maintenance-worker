@@ -76,6 +76,28 @@ Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes both `/mcp` and 
 4. On the selected host, have an administrator create the dedicated unprivileged `openbot-tailnet-probe` SSH account. Select **Get host setup command**, then run the copied command from that account. It appends the restricted public key and sends the host fingerprint to the Worker over HTTPS using a short-lived, single-use pairing code. Use a POSIX shell, standard OpenSSH paths, and `curl` on the host. Review and approve the check when the page advances. The private probe pins the host key before requesting `openbot-enrollment-check-v1` on port 22. The page displays the result.
 5. Repeat **Continue host setup** for each machine. Each new host gets a separate restricted SSH key. Once you finish pairing, remove `PASSKEY_SETUP_TOKEN`. The pilot supports one owner passkey. To revoke the Worker's access to a host or replace its pin, restore the owner-only setup secret if needed, open **Continue host setup**, and choose **Remove an enrolled host**. Removal blocks new checks and deletes the Worker's private key. A check already running can finish. Remove the old public key from the host's `authorized_keys` file as well. To reconnect the host, repeat pairing with the new key.
 
+### Approve a service restart
+
+A Linux administrator can enable the first maintenance operation by installing a root-owned systemd unit named `openbot-maintenance-demo.service` and authorizing the exact restart below. For an acceptance test, use this disposable unit in `/etc/systemd/system/openbot-maintenance-demo.service` and run `sudo systemctl daemon-reload`.
+
+```ini
+[Unit]
+Description=OpenBot disposable maintenance service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+```
+
+Use `visudo` to install this rule under `/etc/sudoers.d/`. The SSH account should have only this sudo permission.
+
+```sudoers
+openbot-tailnet-probe ALL=(root) NOPASSWD: /usr/bin/systemctl restart openbot-maintenance-demo.service
+```
+
+Enroll the host using the current wizard so its SSH key has the latest forced command. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask OpenBot to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. OpenBot can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
+
 ### Optional tagged enrollment
 
 Before starting device sign-in, select **Set up a restricted Tailscale identity**. The wizard guides a tailnet administrator through adding `tag:openbot-probe` and creating an OAuth client with **Auth Keys Write** for that tag and optional **Devices Core Read** for the picker. Paste the credential into the wizard once. The Worker uses it to create a single-use tagged key and optionally load a 15-minute inventory, then discards the OAuth credential. If needed, add the displayed grant for the selected host on `tcp:22`. Check whether existing broader grants also apply to the tag. Operator-configured enrollment credentials still take precedence on a fresh installation. [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) · [How grants combine](https://tailscale.com/docs/features/access-control/grants/grants-explained)

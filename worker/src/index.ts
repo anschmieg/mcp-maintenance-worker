@@ -43,13 +43,17 @@ export class MaintenanceAgent extends McpAgent<Env> {
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id)));
       this.server.registerTool('passkey_test_status', {
-        description: 'Read a passkey dry run or host enrollment check by its original job UUID.',
+        description: 'Read a passkey approval, enrollment check, or service restart by its original job UUID.',
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
       this.server.registerTool('start_host_enrollment', {
         description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. Show the owner the review URL.',
         inputSchema: { ...jobSchema, host: z.string().optional() },
       }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
+      this.server.registerTool('request_service_restart', {
+        description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. Show the owner the review URL.',
+        inputSchema: z.strictObject({ ...jobSchema, host: z.string() }),
+      }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host, true)));
       this.server.registerTool('maintenance_host_status', {
         description: 'Read the last completed SSH enrollment check, optionally for a specific enrolled host.',
         inputSchema: { host: z.string().optional() },

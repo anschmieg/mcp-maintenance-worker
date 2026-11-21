@@ -221,25 +221,30 @@ if (location.pathname.endsWith('/onboard')) {
 } else {
   const job = new URLSearchParams(location.search).get('job');
   post('review-options', { job }).then(({ options: optionsJSON, job: request }) => {
-    title.textContent = request.dry_run ? 'Approve maintenance test' : 'Verify SSH enrollment';
-    details.textContent = request.dry_run
+    title.textContent = request.service ? 'Approve service restart'
+      : request.dry_run ? 'Approve maintenance test' : 'Verify SSH enrollment';
+    details.textContent = request.service
+      ? 'Restart ' + request.service + ' once on ' + request.host + ' as ' + request.run_as +
+        '. The service may be briefly unavailable.'
+      : request.dry_run
       ? request.operation + ' on ' + request.host + ' as ' + request.execution_identity + '. This dry run will not connect to the host.'
       : 'Ask your host administrator to install the restricted SSH key for ' + request.execution_identity + ' on ' +
         request.host + ' first. This check verifies the pinned host key and runs openbot-enrollment-check-v1 once over SSH.';
-    bind('Approve with passkey', async () => {
+    bind(request.service ? 'Approve restart with passkey' : 'Approve with passkey', async () => {
       const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
       const approved = await post('approve', { job, response });
       if (request.dry_run) {
         status.textContent = 'Approval verified. You can close this tab and return to OpenBot to check the result.';
         return;
       }
-      status.textContent = 'Approval verified. Checking SSH enrollment…';
+      status.textContent = request.service ? 'Approval verified. Restarting the service…' : 'Approval verified. Checking SSH enrollment…';
       let result = approved;
       for (let attempt = 0; result.state === 'checking_host' && attempt < 30; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         result = await post('job-status', { job }).catch(() => result);
       }
-      status.textContent = result.state === 'verified' ? 'Host enrollment verified.'
+      status.textContent = result.state === 'service_restarted' ? 'Service restarted.'
+        : result.state === 'verified' ? 'Host enrollment verified.'
         : 'Host check status: ' + result.state + '. Check job ' + job + ' in OpenBot for the result.';
     }, 'Approval did not complete. Retry or return to OpenBot if the request expired.');
   }).catch(() => {

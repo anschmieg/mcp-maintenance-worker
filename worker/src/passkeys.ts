@@ -7,21 +7,23 @@ import {
 } from '@simplewebauthn/server';
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
-import { sameEnrollmentHost, validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
 const prefix = '/passkeys';
 const empty = { executed: false };
 const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: 'openbot-tailnet-probe', dry_run: true } as const;
 const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false } as const;
+const restartOperation = 'restart ' + restartUnit;
+const isHostOperation = (operation: string) => operation === hostCheck.operation || operation === restartOperation;
 type HostVerification = 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed' | 'verified' | 'connection_failed';
 type HostResult =
-  | { state: 'verified'; executed: true; stdout: string; exit_status: 0 }
+  | { state: 'verified' | 'service_restarted'; executed: true; stdout: string; exit_status: 0 }
   | { state: 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed'; executed: false }
-  | { state: 'diagnostic_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
+  | { state: 'diagnostic_failed' | 'restart_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | (Omit<typeof hostCheck, 'host'> & { host: string; fingerprint: string; enrollmentId?: string });
+  target: typeof diagnostic | (Omit<typeof hostCheck, 'host' | 'operation'> & { host: string; fingerprint: string; enrollmentId?: string; operation: string });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
   approved_at?: number;
@@ -41,6 +43,7 @@ export type PasskeyEnv = {
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
   HOST_PROBE?: {
     runHostEnrollmentCheck(expected: Host): Promise<HostResult>;
+    restartDemoService(expected: Host): Promise<HostResult>;
     prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
     startDeviceLogin(): Promise<boolean>;
     removeEnrollmentHost(expected: Host): Promise<boolean>;
@@ -275,7 +278,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return reviewJobId ? this.start(reviewJobId, true, host.address) : null;
   }
 
-  async start(jobId: string, enrollment = false, address?: string) {
+  async start(jobId: string, enrollment = false, address?: string, restart = false) {
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
     if (!credential) return { state: 'enrollment_required', ...empty };
@@ -292,7 +295,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         (legacy?.address === address ? legacy : undefined) : hosts?.values().next().value ?? legacy;
     }
     if (enrollment && !host) return { state: 'host_setup_required', ...empty };
-    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, enrollmentId: host.enrollmentId } : diagnostic;
+    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, enrollmentId: host.enrollmentId, operation: restart ? restartOperation : hostCheck.operation } : diagnostic;
     const options = await generateAuthenticationOptions({
       rpID: origin.hostname, userVerification: 'required',
       allowCredentials: [{ id: credential.id, transports: credential.transports }],
@@ -322,10 +325,11 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const { host, operation, execution_identity, dry_run } = job.target;
     return {
       job_id: jobId, host, operation, execution_identity, dry_run,
-      ...(!job.target.dry_run ? { fingerprint: job.target.fingerprint } : {}), expires_at: job.expires_at,
+      ...(!job.target.dry_run ? { fingerprint: job.target.fingerprint } : {}),
+      ...(operation === restartOperation ? { service: restartUnit, run_as: 'root via a single sudo rule' } : {}), expires_at: job.expires_at,
       ...job.host_result,
       executed: job.host_result ? job.host_result.executed : (
-        job.approved_at && job.target.operation === hostCheck.operation ? null : false
+        job.approved_at && !job.target.dry_run ? null : false
       ),
       state: job.approved_at ? approvedState : job.expires_at <= Date.now() ? 'expired' : 'pending',
       approved_at: job.approved_at ?? null,
@@ -359,7 +363,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async reviewOptions(jobId: string) {
     const job = await this.ctx.storage.get<Job>('job:' + jobId);
     if (!job || job.approved_at || job.expires_at <= Date.now() ||
-        (!job.target.dry_run && job.target.operation !== hostCheck.operation)) return null;
+        (!job.target.dry_run && !isHostOperation(job.target.operation))) return null;
     return job.options;
   }
 
@@ -369,7 +373,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const job = await this.ctx.storage.get<Job>(key);
     const credential = await this.#credential();
     if (!credential || !job || job.approved_at || job.expires_at <= Date.now() ||
-        (!job.target.dry_run && job.target.operation !== hostCheck.operation)) return false;
+        (!job.target.dry_run && !isHostOperation(job.target.operation))) return false;
     const verification = await verifyAuthenticationResponse({
       response, expectedChallenge: job.options.challenge, expectedOrigin: origin.origin,
       expectedRPID: origin.hostname, credential, requireUserVerification: true,
@@ -388,12 +392,12 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const expected = {
         address: job.target.host, fingerprint: job.target.fingerprint, enrollmentId: job.target.enrollmentId,
       };
-      this.ctx.waitUntil(this.#verifyHost(key, expected));
+      this.ctx.waitUntil(this.#verifyHost(key, expected, job.target.operation));
     }
     return accepted;
   }
 
-  async #verifyHost(key: string, expected: Host) {
+  async #verifyHost(key: string, expected: Host, operation: string) {
     let result: HostResult = { state: 'unconfigured', executed: false };
     const enrolled = await this.ctx.storage.get<Host>('onboarding-host:' + expected.address);
     const legacy = await this.ctx.storage.get<Host>('onboarding-host');
@@ -401,8 +405,8 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (removing || !sameEnrollmentHost(enrolled ?? legacy, expected)) {
       result = { state: 'target_changed', executed: false };
     } else if (this.env.HOST_PROBE && validEnrollmentHost(expected)) {
-      result = await this.env.HOST_PROBE.runHostEnrollmentCheck(expected)
-        .catch(() => ({ state: 'check_outcome_unknown', executed: null }));
+      result = await (operation === restartOperation ? this.env.HOST_PROBE.restartDemoService(expected)
+        : this.env.HOST_PROBE.runHostEnrollmentCheck(expected)).catch(() => ({ state: 'check_outcome_unknown', executed: null }));
     }
     await this.ctx.storage.transaction(async tx => {
       const job = await tx.get<Job>(key);
@@ -410,7 +414,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       await tx.put<Job>(key, { ...job, host_result: result });
       const current = await tx.get<Host>('onboarding-host:' + expected.address);
       const legacyHost = await tx.get<Host>('onboarding-host');
-      if (!sameEnrollmentHost(current ?? legacyHost, expected)) return;
+      if (operation !== hostCheck.operation || !sameEnrollmentHost(current ?? legacyHost, expected)) return;
       for (const slot of ['last-completed-host-check', 'last-completed-host-check:' + expected.address]) {
         const previous = await tx.get<string>(slot);
         const previousJob = previous ? await tx.get<Job>('job:' + previous) : undefined;

@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
 import { sameEnrollmentHost, type Host } from '../experiments/tailnet/credentials';
-import { runEnrollmentCheck } from '../experiments/tailnet/ssh-check';
+import { runEnrollmentCheck, runServiceRestart } from '../experiments/tailnet/ssh-check';
 
 export class HostVerifier extends WorkerEntrypoint {
   async configureTailnet(clientId: string, clientSecret: string) {
@@ -32,11 +32,19 @@ export class HostVerifier extends WorkerEntrypoint {
   }
 
   async runHostEnrollmentCheck(expected: Host) {
+    return this.#runHostAction(expected, runEnrollmentCheck);
+  }
+
+  async restartDemoService(expected: Host) {
+    return this.#runHostAction(expected, runServiceRestart);
+  }
+
+  async #runHostAction(expected: Host, execute: typeof runEnrollmentCheck | typeof runServiceRestart) {
     const response = await fetch('http://127.0.0.1:8796/fixture?address=' + encodeURIComponent(expected.address));
     const { port, host, fingerprint, privateKey, interrupt } = await response.json();
     if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };
     const socket = connect({ hostname: '127.0.0.1', port });
-    const report = await runEnrollmentCheck({
+    const report = await execute({
       readable: socket.readable,
       writable: socket.writable,
       close: () => socket.close(),

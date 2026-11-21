@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  enrollmentCommand, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -26,7 +26,15 @@ assert.match(forcedLine, /restrict,command=/);
 assert.ok(!installCommand.includes('PRIVATE KEY'));
 const actualForcedCommand = forcedLine.match(/command="((?:\\.|[^"])*)"/u)[1].replace(/\\(["\\])/gu, '$1');
 assert.equal(actualForcedCommand, forcedCommand);
-for (const request of ['', enrollmentCommand + ' extra', enrollmentCommand + '; id']) {
+const fakeSudo = join(directory, 'fixture-sudo');
+const restartLog = join(directory, 'restarts');
+writeFileSync(fakeSudo, '#!/bin/sh\n' +
+  'test "$#" = 5 && test "$1" = -n && test "$2" = -- && ' +
+  'test "$3" = /usr/bin/systemctl && test "$4" = restart && test "$5" = ' + restartUnit + ' || exit 65\n' +
+  'test "$FIXTURE_MODE" != restart-denied || exit 1\n' +
+  'echo restarted >> "$RESTART_LOG"\n', { mode: 0o700 });
+const fixtureForcedCommand = actualForcedCommand.replace('/usr/bin/sudo', fakeSudo);
+for (const request of ['', enrollmentCommand + ' extra', enrollmentCommand + '; id', restartCommand + ' ssh.service', restartCommand + '; id']) {
   assert.throws(() => execFileSync('/bin/sh', ['-c', actualForcedCommand], {
     env: { SSH_ORIGINAL_COMMAND: request },
   }), error => error.status === 126);
@@ -84,10 +92,12 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
     accept().on('exec', (acceptCommand, _reject, info) => {
       attempts++;
       const stream = acceptCommand();
-      assert.equal(info.command, enrollmentCommand);
-      const stdout = execFileSync('/bin/sh', ['-c', actualForcedCommand], { env: { SSH_ORIGINAL_COMMAND: info.command } });
-      stream.write(mode === 'wrong-response' ? 'unexpected\n' : stdout);
-      stream.exit(0);
+      assert.ok([enrollmentCommand, restartCommand].includes(info.command));
+      const result = spawnSync('/bin/sh', ['-c', fixtureForcedCommand], {
+        env: { SSH_ORIGINAL_COMMAND: info.command, RESTART_LOG: restartLog, FIXTURE_MODE: mode },
+      });
+      stream.write(mode === 'wrong-response' ? 'unexpected\n' : result.stdout);
+      stream.exit(result.status);
       stream.end();
     });
   });
@@ -159,6 +169,10 @@ createServer(async (request, response) => {
     if (mode === 'reset-device-login') deviceLogin = false;
     response.end();
   } else {
-    response.end(JSON.stringify({ attempts, pinned }));
+    let restarts = 0;
+    try { restarts = readFileSync(restartLog, 'utf8').trim().split('\n').length; } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    response.end(JSON.stringify({ attempts, pinned, restarts }));
   }
 }).listen(8796, '127.0.0.1');

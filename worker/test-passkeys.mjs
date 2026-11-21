@@ -296,13 +296,39 @@ assert.equal((await call('passkey_test_status', staleJob)).state, 'target_change
 assert.equal(await attempts(), beforeExpiry + 1);
 console.log('PASS: removing a host blocks access, retries cleanly, and invalidates old approvals after re-enrollment');
 
+const restartJob = randomUUID();
+const restartRequest = await call('request_service_restart', restartJob, address);
+assert.equal(restartRequest.state, 'pending');
+assert.equal(restartRequest.service, 'openbot-maintenance-demo.service');
+assert.equal(restartRequest.host, address);
+assert.equal((await call('request_service_restart', restartJob, alternateAddress)).state, 'job_id_in_use');
+assert.equal((await call('start_host_enrollment', restartJob, address)).state, 'job_id_in_use');
+const { options: restartOptions } = await (await post('review-options', { job: restartJob })).json();
+assert.equal((await post('approve', { job: restartJob, response })).status, 409);
+const restartApproval = assertion(0x05, origin, restartOptions.challenge);
+assert.equal(await attempts(), beforeExpiry + 1);
+const approvalRace = await Promise.all([
+  post('approve', { job: restartJob, response: restartApproval }),
+  post('approve', { job: restartJob, response: restartApproval }),
+]);
+assert.deepEqual(approvalRace.map(result => result.status).sort(), [200, 409]);
+for (let retry = 0; retry < 60; retry++) {
+  const current = await call('passkey_test_status', restartJob);
+  if (current.state !== 'checking_host') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal((await call('passkey_test_status', restartJob)).state, 'service_restarted');
+assert.equal((await call('request_service_restart', restartJob, address)).state, 'service_restarted');
+assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, 1);
+console.log('PASS: exact service restart uses one owner passkey, is target-bound, and executes once');
+
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
 await call('start_host_enrollment', hostJob, address);
 const hostReview = await (await post('review-options', { job: hostJob })).json();
 const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
 assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 200);
-const count = beforeExpiry + 2;
+const count = beforeExpiry + 3;
 for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
   await new Promise(resolve => setTimeout(resolve, 100));
 }

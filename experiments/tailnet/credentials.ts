@@ -85,8 +85,14 @@ export async function generateSshKey() {
 
 export const enrollmentCommand = 'openbot-enrollment-check-v1';
 export const enrollmentMarker = 'openbot-host-ready-v1';
-export const forcedCommand = '[ "$SSH_ORIGINAL_COMMAND" = ' + enrollmentCommand +
-  ' ] || exit 126; echo ' + enrollmentMarker;
+export const restartCommand = 'openbot-restart-demo-service-v1';
+export const restartUnit = 'openbot-maintenance-demo.service';
+export const restartMarker = 'openbot-service-restarted-v1';
+export const forcedCommand =
+  'case "$SSH_ORIGINAL_COMMAND" in ' +
+  enrollmentCommand + ') echo ' + enrollmentMarker + ';; ' +
+  restartCommand + ') /usr/bin/sudo -n -- /usr/bin/systemctl restart ' + restartUnit +
+  ' && echo ' + restartMarker + ';; *) exit 126;; esac';
 
 export function hostInstallCommand(publicKey: string) {
   if (!/^ssh-ed25519 [A-Za-z0-9+/]{68}$/u.test(publicKey)) throw new Error('Invalid enrollment public key');

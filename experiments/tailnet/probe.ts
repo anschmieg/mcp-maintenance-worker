@@ -1,5 +1,5 @@
 import { TailnetObject, Tailnet } from './src/index.js';
-import { runEnrollmentCheck } from './ssh-check';
+import { runEnrollmentCheck, runServiceRestart } from './ssh-check';
 import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
@@ -51,7 +51,11 @@ export class HostVerifier extends WorkerEntrypoint {
   }
 
   async runHostEnrollmentCheck(expected: Host) {
-    return this.#node().runEnrollmentCheck(expected);
+    return this.#node().runHostAction(expected, 'check');
+  }
+
+  async restartDemoService(expected: Host) {
+    return this.#node().runHostAction(expected, 'restart');
   }
 }
 
@@ -205,7 +209,7 @@ export class ProbeNode extends TailnetObject {
     });
   }
 
-  async runEnrollmentCheck(expected: Host) {
+  async runHostAction(expected: Host, operation: 'check' | 'restart') {
     const { host, key } = await this.ctx.storage.transaction(async tx => {
       const legacy = await tx.get<Host>('enrollment-host');
       const legacyHost = legacy?.address === expected.address ? legacy : undefined;
@@ -218,7 +222,9 @@ export class ProbeNode extends TailnetObject {
     if (!host || !key) return { state: 'unconfigured', executed: false };
     if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };
     const tailnet = await this.#readyTailnet();
-    return runEnrollmentCheck(await tailnet.connect(host.address + ':22'), {
+    if (operation !== 'check' && operation !== 'restart') return { state: 'unconfigured', executed: false };
+    const execute = operation === 'restart' ? runServiceRestart : runEnrollmentCheck;
+    return execute(await tailnet.connect(host.address + ':22'), {
       PROBE_SSH_KEY: key.privateKey, PROBE_HOST_FINGERPRINT: host.fingerprint,
     });
   }
