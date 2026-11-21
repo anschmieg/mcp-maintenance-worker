@@ -6,8 +6,9 @@ import { encodeCBOR } from '@levischuck/tiny-cbor';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const { PASSKEY_ORIGIN: origin, PASSKEY_SETUP_TOKEN: setupToken, MCP_BEARER_TOKEN: mcpToken } = process.env;
-assert.ok(origin && setupToken && mcpToken);
+const { PASSKEY_ORIGIN: origin, PASSKEY_SETUP_TOKEN: bootstrapCode, MCP_BEARER_TOKEN: mcpToken } = process.env;
+assert.ok(origin && bootstrapCode && mcpToken);
+let setupToken = bootstrapCode;
 const rpId = new URL(origin).hostname;
 
 async function post(path, body, requestOrigin = origin) {
@@ -86,10 +87,26 @@ const registration = {
     attestationObject: b64(attestation),
   },
 };
-assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 200);
+const enrolledOwner = await post('enroll', { token: setupToken, response: registration });
+assert.equal(enrolledOwner.status, 200);
+const { token: firstSession } = await enrolledOwner.json();
 assert.deepEqual(await (await post('setup-state', { token: setupToken })).json(), { enrolled: true });
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
+assert.equal((await post('prepare-host', { token: bootstrapCode })).status, 403);
+assert.deepEqual(await (await post('owner-state', {})).json(), { enrolled: true });
+const ownerSignIn = await (await post('sign-in-options', {})).json();
+const laterSignIn = await (await post('sign-in-options', {})).json();
+assert.notEqual(ownerSignIn.id, laterSignIn.id);
+const ownerAssertion = assertion(0x05, origin, ownerSignIn.options.challenge);
+assert.equal((await post('sign-in', { id: ownerSignIn.id, response: assertion(0x01, origin, ownerSignIn.options.challenge) })).status, 403);
+const sessionResponse = await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion });
+assert.equal(sessionResponse.status, 200);
+setupToken = (await sessionResponse.json()).token;
+assert.notEqual(setupToken, firstSession);
+assert.equal((await post('prepare-host', { token: firstSession })).status, 403);
+assert.equal((await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion })).status, 403);
+
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
 assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), { state: 'unconfigured' });
 assert.equal((await post('start-device-login', { token: mcpToken })).status, 403);
@@ -365,13 +382,61 @@ assert.equal((await call('request_service_restart', restartJob, address)).state,
 assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, 1);
 console.log('PASS: exact service restart uses one owner passkey, is target-bound, and executes once');
 
+await fetch(fixture + '/mode/automatic-discovery', { method: 'POST' });
+const detectedPair = await (await post('begin-host-pairing', { token: setupToken })).json();
+const detection = await (await downloadPairingScript(detectedPair)).text();
+assert.match(detection, /tailscale ip -4/u);
+assert.doesNotMatch(detection, /ssh-ed25519/u);
+execFileSync('/bin/sh', ['-n', '-c', detection]);
+const claimHost = async (address, pairing = detectedPair) => fetch(origin + '/passkeys/claim-host?pair=' + pairing.id, {
+  method: 'POST', headers: { Authorization: 'Bearer ' + pairing.download.token },
+  body: new URLSearchParams({ address }),
+});
+assert.equal((await hostCallback(detectedPair.download.token, hostPin, detectedPair.id)).status, 403);
+assert.equal((await claimHost('100.127.0.20')).status, 403);
+const detectedAddress = '100.64.0.4';
+const claim = await claimHost(detectedAddress);
+assert.equal(claim.status, 200);
+const detectedInstaller = await claim.text();
+assert.match(detectedInstaller, /target_address='100\.64\.0\.4'/u);
+assert.match(detectedInstaller, /target_name='Auto host'/u);
+execFileSync('/bin/sh', ['-n', '-c', detectedInstaller]);
+assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json(),
+  { state: 'waiting_for_confirmation', host: 'Auto host' });
+await fetch(fixture + '/mode/wrong-pin', { method: 'POST' });
+assert.equal((await hostCallback(detectedPair.download.token, hostPin, detectedPair.id)).status, 200);
+async function finishDetectedPair(retry = false) {
+  let status = await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id, retry })).json();
+  for (let attempt = 0; status.state === 'verifying' && attempt < 60; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    status = await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json();
+  }
+  return status;
+}
+assert.deepEqual(await finishDetectedPair(), { state: 'verification_failed', failure: 'host_key_unverified' });
+assert.ok(!(await call('maintenance_hosts')).hosts.some(host => host.address === detectedAddress));
+await fetch(fixture + '/mode/normal', { method: 'POST' });
+const verified = await finishDetectedPair(true);
+assert.deepEqual(verified, { state: 'verified', host: 'Auto host' });
+const receiptUrl = origin + '/passkeys/pair-result?pair=' + detectedPair.id;
+assert.equal((await fetch(receiptUrl)).status, 403);
+assert.equal(await (await fetch(receiptUrl, {
+  headers: { Authorization: 'Bearer ' + detectedPair.download.token },
+})).text(), 'verified\n');
+assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json(), verified);
+assert.ok((await call('maintenance_hosts')).hosts.some(host => host.address === detectedAddress));
+const secondAuto = await (await post('begin-host-pairing', { token: setupToken })).json();
+assert.notEqual(secondAuto.id, detectedPair.id);
+assert.equal((await claimHost(detectedAddress, secondAuto)).status, 409);
+console.log('PASS: passkey resume, host detection, rejection of invisible devices, verification retry, and repeat pairing');
+
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
 await call('start_host_enrollment', hostJob, address);
 const hostReview = await (await post('review-options', { job: hostJob })).json();
 const hostApproval = assertion(0x05, origin, hostReview.options.challenge);
 assert.equal((await post('approve', { job: hostJob, response: hostApproval })).status, 200);
-const count = beforeExpiry + 3;
+const count = beforeExpiry + 4;
 for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
   await new Promise(resolve => setTimeout(resolve, 100));
 }

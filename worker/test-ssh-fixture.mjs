@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, listTailnetDevices, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -63,25 +63,13 @@ for (const account of ['maintenance-relay', legacyAccount]) {
   assert.ok(sameEnrollmentHost(previous, { ...previous }));
   assert.ok(!sameEnrollmentHost(previous, { ...previous, account: 'pasta-mcp' }));
 }
-const devices = await listTailnetDevices({
-  TS_OAUTH_CLIENT_ID: 'example-id', TS_OAUTH_CLIENT_SECRET: 'example-secret',
-}, async (_url, options) => {
-  if (options.method === 'POST') {
-    assert.equal(options.body.get('scope'), 'devices:core:read');
-    assert.equal(options.body.has('tags'), false);
-    return Response.json({ access_token: 'test-read-token' });
-  }
-  return Response.json({ devices: [
-    { hostname: 'Example host', addresses: ['fd7a:115c:a1e0::1', '100.64.0.2'], user: 'should not appear' },
-    { hostname: 'Not in the tailnet', addresses: ['127.0.0.1'] },
-  ] });
-});
-assert.deepEqual(devices, [{ name: 'Example host', address: '100.64.0.2' }]);
+const devices = [{ name: 'Example host', address: '100.64.0.2' }];
 let mode = 'normal';
 let attempts = 0;
 const enrolled = new Map();
 let tailnetConfigured = false;
 let deviceLogin = false;
+let automaticDiscovery = false;
 
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
@@ -114,6 +102,7 @@ createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const address = url.searchParams.get('address');
   const clientKey = clientKeys.get(address);
+  const visible = automaticDiscovery ? [...devices, { name: 'Auto host', address: '100.64.0.4' }] : devices;
   if (url.pathname === '/install') {
     const key = clientKey ?? await generateSshKey();
     clientKeys.set(address, key);
@@ -137,7 +126,7 @@ createServer(async (request, response) => {
     response.end(JSON.stringify(state));
   } else if (request.url === '/prepare') {
     response.end(JSON.stringify(tailnetConfigured
-      ? { state: 'connected', deviceTag: 'tag:openbot-probe', devices }
+      ? { state: 'connected', deviceTag: 'tag:openbot-probe', devices: visible }
       : { state: 'unconfigured' }));
   } else if (request.url === '/oauth' && request.method === 'POST') {
     let body = '';
@@ -174,6 +163,7 @@ createServer(async (request, response) => {
   } else if (request.method === 'POST' && request.url.startsWith('/mode/')) {
     mode = request.url.slice('/mode/'.length);
     if (mode === 'reset-device-login') deviceLogin = false;
+    if (mode === 'automatic-discovery') automaticDiscovery = true;
     response.end();
   } else {
     let restarts = 0;

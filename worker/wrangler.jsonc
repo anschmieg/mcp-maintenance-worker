@@ -1,12 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "maintenance-screening-poc",
+  "name": "pasta",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
-  "rules": [{"type": "Text", "globs": ["**/*.css", "**/pairing-install.sh"], "fallthrough": true}],
+  "rules": [{"type": "Text", "globs": ["**/*.css", "**/pairing-install.sh", "**/pairing-detect.sh"], "fallthrough": true}],
+  "services": [{"binding": "HOST_PROBE", "service": "maintenance-tailnet-ssh-probe", "entrypoint": "HostVerifier"}],
   "ai": {"binding": "AI"},
   "durable_objects": {"bindings":[{"name":"MCP_OBJECT","class_name":"MaintenanceAgent"},{"name":"PROBES","class_name":"TimingProbe"},{"name":"PASSKEYS","class_name":"PasskeyApproval"}]},
   "migrations":[{"tag":"v1","new_sqlite_classes":["MaintenanceAgent"]},{"tag":"v2","new_sqlite_classes":["TimingProbe"]},{"tag":"v3","new_sqlite_classes":["PasskeyApproval"]}]

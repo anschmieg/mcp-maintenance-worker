@@ -1,7 +1,7 @@
 const api = 'https://api.tailscale.com/api/v2/';
 export const maintenanceAccount = 'pasta-mcp';
 export const legacyAccount = 'openbot-tailnet-probe';
-export const tailnetHostname = 'pasta-mcp';
+export const tailnetHostname = 'pasta-mcp-worker';
 const hostAccounts = [maintenanceAccount, 'maintenance-relay', legacyAccount] as const;
 export type HostAccount = typeof hostAccounts[number];
 
@@ -57,24 +57,6 @@ export async function mintTaggedAuthKey(env: OAuthSettings, request = fetch) {
 }
 
 export type TailnetDevice = { name: string; address: string };
-
-export async function listTailnetDevices(env: OAuthSettings, request = fetch): Promise<TailnetDevice[]> {
-  const token = await accessToken(env, 'devices:core:read', request);
-  const result = await request(api + 'tailnet/-/devices', {
-    redirect: 'error', signal: AbortSignal.timeout(5000), headers: { Authorization: 'Bearer ' + token },
-  });
-  if (!result.ok) throw new Error('Tailscale device listing failed');
-  const { devices } = await result.json() as { devices?: Array<{ hostname?: string; addresses?: string[] }> };
-  const choices = new Map<string, TailnetDevice>();
-  for (const device of devices ?? []) {
-    const address = device.addresses?.find(validTailnetIpv4);
-    if (!address) continue;
-    const name = typeof device.hostname === 'string' ? device.hostname.slice(0, 120) : address;
-    choices.set(address, { name: name || address, address });
-    if (choices.size === 100) break;
-  }
-  return [...choices.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
 
 export async function generateSshKey() {
   const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;

@@ -35,7 +35,7 @@
     <h2>One-time tailnet setup</h2>
     <ol>
       <li>In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, add this tag under <code>tagOwners</code>. Keep the rest of your policy and check that broad rules do not grant the new tag unintended access.</li>
-      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential → OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> and select <code>tag:openbot-probe</code>. For the device picker, select <strong>Read</strong> for <strong>Devices Core</strong>. Select <strong>Generate credential</strong>.</li>
+      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential → OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> and select <code>tag:openbot-probe</code>. Select <strong>Generate credential</strong>.</li>
       <li>Paste the client ID and secret below, then select <strong>Connect with OAuth</strong>.</li>
     </ol>
     <textarea id="tailnet-policy" rows="5" cols="48" readonly aria-label="Tailnet tag policy snippet"></textarea>
@@ -49,23 +49,15 @@
     <button id="remove-host" class="danger" type="button">Remove host</button>
     <p id="remove-host-status" role="status"></p>
   </details>
-  <div id="host-settings" hidden>
-    <p id="device-picker" hidden><label>Tailscale device <select id="device"><option value="">Enter address instead</option></select></label></p>
-    <p id="manual-address"><label>Host Tailscale IPv4 address <input id="address" autocomplete="off"></label> <a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Find it in Machines</a></p>
-    <div id="host-grant" class="panel" hidden>
-      <p>If SSH access is not already allowed for the probe, add this grant in <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>.</p>
-      <textarea id="grant-policy" rows="8" cols="48" readonly aria-label="Host SSH grant snippet"></textarea>
-    </div>
-  </div>
   <section id="pair-command" hidden>
     <label for="install-command">Host setup command</label>
-    <p class="hint">Run it on the selected Linux host from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes.</p>
+    <p class="hint">Run it on the Linux host you want to add from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes.</p>
     <textarea id="install-command" rows="3" readonly spellcheck="false"></textarea>
     <div class="command-actions">
       <button id="copy-install" type="button">Copy command</button>
     </div>
     <details>
-      <summary>Inspect the script before running</summary>
+      <summary>Inspect the device-detection script</summary>
       <textarea id="script-preview" rows="12" readonly aria-label="Host setup script"></textarea>
     </details>
   </section>

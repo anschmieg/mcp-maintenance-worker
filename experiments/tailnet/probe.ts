@@ -1,11 +1,10 @@
 import { TailnetObject, Tailnet } from './src/index.js';
 import { runEnrollmentCheck, runServiceRestart } from './ssh-check';
-import { generateSshKey, mintTaggedAuthKey, listTailnetDevices, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, isHostAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
+import { generateSshKey, mintTaggedAuthKey, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, isHostAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 type Key = Awaited<ReturnType<typeof generateSshKey>>;
 type GuidedJoin = { authKey?: string };
-type Inventory = { devices: TailnetDevice[]; expires: number };
 
 function tailscaleLoginUrl(value: unknown) {
   if (typeof value !== 'string') return;
@@ -88,15 +87,12 @@ export class ProbeNode extends TailnetObject {
     const settings = {
       TS_OAUTH_CLIENT_ID: clientId, TS_OAUTH_CLIENT_SECRET: clientSecret, TS_DEVICE_TAG: guidedTag,
     };
-    const [authKey, devices] = await Promise.all([
-      mintTaggedAuthKey(settings).catch(() => null),
-      listTailnetDevices(settings).catch(() => []),
-    ]);
+    const authKey = await mintTaggedAuthKey(settings).catch(() => null);
     if (!authKey) return false;
     return this.ctx.storage.transaction(async tx => {
       if (await tx.get('interactive-tailnet-join')) return false;
       await tx.put('guided-tailnet-join', { authKey });
-      await tx.put('setup-inventory', { devices, expires: Date.now() + 15 * 60_000 });
+      await tx.delete('setup-inventory');
       return true;
     });
   }
@@ -152,13 +148,13 @@ export class ProbeNode extends TailnetObject {
       };
     }
 
-    const connected = interactive || await this.#readyTailnet().then(() => true, () => false);
-    const inventory = await this.ctx.storage.get<Inventory>('setup-inventory');
-    if (inventory && inventory.expires <= Date.now()) await this.ctx.storage.delete('setup-inventory');
+    const ready = interactive ? tailnet : await this.#readyTailnet().catch(() => null);
+    const connected = Boolean(ready);
+    const peers = visibleDevices(ready?.status().visibleDevices);
+    await this.ctx.storage.delete('setup-inventory');
     return {
       state: connected ? 'connected' : 'tailnet_pending', deviceTag,
-      devices: status ? visibleDevices(status.visibleDevices) :
-        inventory && inventory.expires > Date.now() ? inventory.devices : [],
+      devices: peers,
     };
   }
 

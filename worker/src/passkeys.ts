@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import {
   generateAuthenticationOptions, generateRegistrationOptions,
   verifyAuthenticationResponse, verifyRegistrationResponse,
@@ -9,6 +9,7 @@ import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
 import approvalStyles from './passkey-page.css';
 import pairingInstaller from './pairing-install.sh';
+import pairingDetector from './pairing-detect.sh';
 import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
@@ -34,7 +35,8 @@ type Job = {
   host_result?: HostResult;
 };
 type Enrollment = { challenge: string; expires: number };
-type Pairing = { id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'canceled' };
+type PairingProgress = { state: string; host?: string; failure?: string };
+type Pairing = { automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'canceled' };
 const pairingLifetime = 15 * 60_000;
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -72,7 +74,7 @@ function setupAuthorized(env: PasskeyEnv, token: unknown) {
 export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   #executionOwner = crypto.randomUUID();
   #changingHosts = new Set<string>();
-  #finishingPairings = new Map<string, Promise<Awaited<ReturnType<PasskeyApproval['start']>> | null>>();
+  #finishingPairings = new Map<string, Promise<PairingProgress | null>>();
 
   #credential() { return this.ctx.storage.get<WebAuthnCredential>('credential'); }
 
@@ -80,6 +82,68 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const testLifetime = Number(this.env.PASSKEY_LOCAL_TEST_JOB_TTL_MS);
     return passkeyOrigin(this.env)?.protocol === 'http:' &&
       Number.isSafeInteger(testLifetime) && testLifetime > 0 && testLifetime < lifetime ? testLifetime : lifetime;
+  }
+
+  async #ownerAuthorized(token: unknown) {
+    if (typeof token !== 'string' || !/^[0-9a-f-]{72}$/u.test(token)) return false;
+    const session = await this.ctx.storage.get<{ hash: string; expires: number }>('owner-session');
+    return Boolean(session && session.expires > Date.now() &&
+      timingSafeEqual(Buffer.from(session.hash), Buffer.from(hashToken(token))));
+  }
+
+  async ownerState() {
+    return { enrolled: Boolean(await this.#credential()) };
+  }
+
+  async #signInSeal(payload: string) {
+    let key = await this.ctx.storage.get<string>('owner-sign-in-key');
+    if (!key) {
+      const candidate = crypto.randomUUID() + crypto.randomUUID();
+      key = await this.ctx.storage.transaction(async tx => {
+        const existing = await tx.get<string>('owner-sign-in-key');
+        if (existing) return existing;
+        await tx.put('owner-sign-in-key', candidate);
+        return candidate;
+      });
+    }
+    return createHmac('sha256', key).update(payload).digest('hex');
+  }
+
+  async signInOptions() {
+    if (!await this.#credential()) return null;
+    const origin = passkeyOrigin(this.env)!;
+    const options = await generateAuthenticationOptions({ rpID: origin.hostname, userVerification: 'required' });
+    const payload = (Date.now() + lifetime) + '.' + options.challenge;
+    return { id: payload + '.' + await this.#signInSeal(payload), options };
+  }
+
+  async signIn(id: unknown, response: AuthenticationResponseJSON) {
+    if (typeof id !== 'string' || !/^[0-9]{13}\.[A-Za-z0-9_-]{32,128}\.[a-f0-9]{64}$/u.test(id)) return null;
+    const [deadline, challenge, seal] = id.split('.');
+    const expires = Number(deadline);
+    const origin = passkeyOrigin(this.env)!;
+    const credential = await this.#credential();
+    if (expires <= Date.now() || !credential || response?.id !== credential.id ||
+        !timingSafeEqual(Buffer.from(seal), Buffer.from(await this.#signInSeal(deadline + '.' + challenge)))) return null;
+    const verification = await verifyAuthenticationResponse({
+      response, expectedChallenge: challenge, expectedOrigin: origin.origin,
+      expectedRPID: origin.hostname, credential, requireUserVerification: true,
+    }).catch(() => null);
+    if (!verification?.verified) return null;
+    const token = crypto.randomUUID() + crypto.randomUUID();
+    const accepted = await this.ctx.storage.transaction(async tx => {
+      const stored = await tx.get<WebAuthnCredential>('credential');
+      const used = await tx.get<Record<string, number>>('used-owner-challenges') ?? {};
+      const now = Date.now();
+      if (expires <= now || used[challenge] > now ||
+          stored?.id !== credential.id || stored.counter !== credential.counter) return false;
+      const recent = Object.fromEntries(Object.entries(used).filter(([, deadline]) => deadline > now));
+      await tx.put('credential', { ...credential, counter: verification.authenticationInfo.newCounter });
+      await tx.put('used-owner-challenges', { ...recent, [challenge]: expires });
+      await tx.put('owner-session', { hash: hashToken(token), expires: now + 30 * 60_000 });
+      return true;
+    });
+    return accepted ? token : null;
   }
 
   async setupState(token: unknown) {
@@ -113,17 +177,19 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     }).catch(() => null);
     if (!verification?.verified) return false;
     const credential = verification.registrationInfo.credential;
+    const session = crypto.randomUUID() + crypto.randomUUID();
     return this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Enrollment>('enrollment');
       if (current?.challenge !== enrollment.challenge || current.expires <= Date.now() || await tx.get('credential')) return false;
       await tx.put('credential', credential);
       await tx.delete('enrollment');
-      return true;
+      await tx.put('owner-session', { hash: hashToken(session), expires: Date.now() + 30 * 60_000 });
+      return session;
     });
   }
 
   async prepareHost(token: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential()) return null;
+    if (!await this.#ownerAuthorized(token) || !await this.#credential()) return null;
     if (!this.env.HOST_PROBE) return { state: 'probe_unavailable' };
     const probe = await this.env.HOST_PROBE.prepareEnrollment().catch(() => ({ state: 'probe_unavailable' }));
     const inventory = await this.listHosts();
@@ -136,19 +202,19 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   }
 
   async startDeviceLogin(token: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential()) return false;
+    if (!await this.#ownerAuthorized(token) || !await this.#credential()) return false;
     return (await this.env.HOST_PROBE?.startDeviceLogin().catch(() => false)) ?? false;
   }
 
   async configureTailnet(token: unknown, clientId: unknown, clientSecret: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+    if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(clientId) ||
         typeof clientSecret !== 'string' || !/^[\x21-\x7e]{16,256}$/u.test(clientSecret)) return false;
     return (await this.env.HOST_PROBE?.configureTailnet(clientId, clientSecret).catch(() => false)) ?? false;
   }
 
   async removeHost(token: unknown, address: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+    if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof address !== 'string' || !validTailnetIpv4(address) || this.#changingHosts.has(address)) return null;
     this.#changingHosts.add(address);
     try {
@@ -181,8 +247,67 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     }
   }
 
+  async beginAutomaticPairing(token: unknown) {
+    if (!await this.#ownerAuthorized(token) || !await this.#credential()) return null;
+    if ((await this.prepareHost(token))?.state !== 'connected') return null;
+    const id = crypto.randomUUID();
+    const pairingToken = crypto.randomUUID() + crypto.randomUUID();
+    await this.ctx.storage.put<Pairing>('pairing:' + id, {
+      id, address: '', automatic: true, account: maintenanceAccount,
+      tokenHash: hashToken(pairingToken), expires: Date.now() + pairingLifetime,
+    });
+    return this.#pairingCommand(id, maintenanceAccount, pairingToken);
+  }
+
+  #pairingCommand(id: string, account: HostAccount, pairingToken: string) {
+    const url = new URL('/setup', passkeyOrigin(this.env));
+    url.searchParams.set('pair', id);
+    return {
+      id, account, download: { url: url.href, token: pairingToken },
+      installCommand: 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + pairingToken) +
+        ' ' + shellQuote(url.href) + ' | sudo sh',
+    };
+  }
+
+  async claimPairing(id: string | null, token: string, address: string | null) {
+    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token) || !address || !validTailnetIpv4(address)) {
+      return { error: 'This machine has no usable Tailscale IPv4 address.', status: 400 };
+    }
+    const slot = 'pairing:' + id;
+    const pair = await this.ctx.storage.get<Pairing>(slot);
+    const hash = hashToken(token);
+    if (!pair?.automatic || pair.tokenHash !== hash || pair.expires <= Date.now()) {
+      return { error: 'This command expired or was already used. Get a fresh one from the setup page.', status: 403 };
+    }
+    const probe = await this.env.HOST_PROBE?.prepareEnrollment().catch(() => undefined);
+    if (probe?.state !== 'connected') return { error: 'PaSTA is not connected to Tailscale. Check the setup page.', status: 503 };
+    const peer = probe.devices?.find(device => device.address === address);
+    if (!peer) return { error: 'PaSTA cannot see this device. Check that both are on the same tailnet and that its policy allows access.', status: 403 };
+    const claimed = await this.ctx.storage.transaction(async tx => {
+      const current = await tx.get<Pairing>(slot);
+      if (!current || current.tokenHash !== hash || current.expires <= Date.now() ||
+          (current.address && current.address !== address)) return false;
+      const legacy = await tx.get<Host>('onboarding-host');
+      if (legacy?.address === address || await tx.get('onboarding-host:' + address) ||
+          await tx.get('removing-host:' + address)) return false;
+      const addressSlot = 'pairing-address:' + address;
+      const previousId = await tx.get<string>(addressSlot);
+      if (previousId && previousId !== id) {
+        const previous = await tx.get<Pairing>('pairing:' + previousId);
+        if (previous?.fingerprint) return false;
+        await tx.delete('pairing:' + previousId);
+      }
+      await tx.put(addressSlot, id);
+      await tx.put(slot, { ...current, address, addressName: peer.name });
+      return true;
+    });
+    if (!claimed) return { error: 'This device is already paired or the command was claimed by another host.', status: 409 };
+    const script = await this.pairingScript(id, token, true);
+    return script ? { script, status: 200 } : { error: 'PaSTA could not prepare the SSH key. Run the command again.', status: 503 };
+  }
+
   async beginPairing(token: unknown, address: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+    if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof address !== 'string' || !validTailnetIpv4(address)) return null;
     if (this.#changingHosts.has(address)) return null;
     this.#changingHosts.add(address);
@@ -212,22 +337,22 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
     if (!pairing) return null;
     if (pairing.fingerprint) return { id: pairing.id };
-    const url = new URL('/setup', passkeyOrigin(this.env));
-    url.searchParams.set('pair', id);
-    return {
-      id,
-      account: pairing.account ?? legacyAccount,
-      download: { url: url.href, token: callbackToken },
-      installCommand: 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
-        ' ' + shellQuote(url.href) + ' | sudo sh',
-    };
+    return this.#pairingCommand(id, pairing.account ?? legacyAccount, callbackToken);
   }
 
-  async pairingScript(id: string | null, token: string) {
+  async pairingScript(id: string | null, token: string, claimed = false) {
     if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
     const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
     if (!pair || !pair.tokenHash || pair.fingerprint || pair.expires <= Date.now() ||
         !timingSafeEqual(Buffer.from(pair.tokenHash), Buffer.from(hashToken(token)))) return null;
+    if (pair.automatic && !claimed) {
+      const claimUrl = new URL(prefix + '/claim-host', passkeyOrigin(this.env));
+      claimUrl.searchParams.set('pair', id);
+      return [
+        '#!/bin/sh', 'pairing_token=' + shellQuote(token),
+        'claim_url=' + shellQuote(claimUrl.href), pairingDetector,
+      ].join('\n');
+    }
     const account = pair.account ?? legacyAccount;
     const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address, account).catch(() => null);
     if (!install) return null;
@@ -236,16 +361,18 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return [
       '#!/bin/sh',
       'target_address=' + shellQuote(pair.address),
+      'target_name=' + shellQuote((pair.addressName ?? pair.address).replace(/[\x00-\x1f\x7f]/gu, '').slice(0, 160)),
       'account=' + shellQuote(account),
       'pairing_token=' + shellQuote(token),
       'callback_url=' + shellQuote(url.href),
+      'result_url=' + shellQuote(pair.automatic ? new URL(prefix + '/pair-result?pair=' + id, passkeyOrigin(this.env)).href : ''),
       'install_command=' + shellQuote(install),
       pairingInstaller,
     ].join('\n');
   }
 
   async cancelPairing(token: unknown, id: unknown) {
-    if (!setupAuthorized(this.env, token) || !await this.#credential() ||
+    if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof id !== 'string' || !uuid.test(id)) return null;
     return this.ctx.storage.transaction(async tx => {
       const slot = 'pairing:' + id;
@@ -265,43 +392,85 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const candidateFingerprint = typeof fingerprint === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)
       ? fingerprint : undefined;
     if (canceled ? fingerprint !== null : !candidateFingerprint) return false;
-    return this.ctx.storage.transaction(async tx => {
+    const accepted = await this.ctx.storage.transaction(async tx => {
       const slot = id === null ? 'pairing' : 'pairing:' + id;
       const pair = await tx.get<Pairing>(slot);
-      if (!pair || pair.fingerprint || pair.expires <= Date.now() || pair.tokenHash !== hashToken(callbackToken)) return false;
+      if (!pair || !pair.address || pair.fingerprint || pair.expires <= Date.now() || pair.tokenHash !== hashToken(callbackToken)) return false;
       if (canceled) {
         await tx.put<Pairing>(slot, { ...pair, accountAction: 'canceled', tokenHash: '' });
         return true;
       }
       if (pair.account && accountAction !== 'created' && accountAction !== 'reused') return false;
       await tx.put<Pairing>(slot, {
-        ...pair, fingerprint: candidateFingerprint, tokenHash: '',
+        ...pair, fingerprint: candidateFingerprint, tokenHash: '', receiptHash: pair.automatic ? pair.tokenHash : undefined,
         accountAction: accountAction === 'created' || accountAction === 'reused' ? accountAction : undefined,
       });
       return true;
     });
+    if (accepted && !canceled && id) {
+      const slot = 'pairing:' + id;
+      const pair = await this.ctx.storage.get<Pairing>(slot);
+      if (pair?.automatic) this.#startPairingCheck(pair, slot);
+    }
+    return accepted;
   }
 
-  async finishPairing(token: unknown, id: unknown) {
-    if (!setupAuthorized(this.env, token) || typeof id !== 'string') return null;
+  async pairingReceipt(id: string | null, token: string) {
+    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
+    const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
+    if (!pair?.receiptHash || pair.expires <= Date.now() || pair.receiptHash !== hashToken(token)) return null;
+    if (!pair.check || this.#finishingPairings.has(id)) return 'verifying';
+    return pair.check.state === 'verified' ? 'verified' : 'verification_failed';
+  }
+
+  async finishPairing(token: unknown, id: unknown, retry = false) {
+    if (!await this.#ownerAuthorized(token) || typeof id !== 'string') return null;
     const next = 'pairing:' + id;
     const slot = await this.ctx.storage.get<Pairing>(next) ? next : 'pairing';
     const pair = await this.ctx.storage.get<Pairing>(slot);
     if (pair?.id === id && pair.accountAction === 'canceled') return { state: 'pairing_canceled' };
     if (pair?.id !== id || (!pair.fingerprint && pair.expires <= Date.now())) return { state: 'pairing_expired' };
-    if (!pair.fingerprint) return { state: 'waiting_for_host' };
+    if (!pair.fingerprint) return { state: pair.address && pair.automatic ? 'waiting_for_confirmation' : 'waiting_for_host', host: pair.automatic ? pair.addressName : undefined };
     const finishing = this.#finishingPairings.get(id);
-    if (finishing) return finishing;
+    if (finishing) return pair.automatic ? { state: 'verifying', host: pair.addressName } : finishing;
+    if (pair.automatic && pair.check?.state === 'verified') return { state: 'verified', host: pair.addressName ?? pair.address };
+    if (pair.automatic && pair.check && !retry) return { state: 'verification_failed', failure: pair.check.state };
+    const tracked = this.#startPairingCheck(pair, slot);
+    if (!tracked) return { state: 'verifying', host: pair.addressName };
+    return pair.automatic ? { state: 'verifying', host: pair.addressName } : tracked;
+  }
+
+  #startPairingCheck(pair: Pairing, slot: string) {
     if (this.#changingHosts.has(pair.address)) return null;
+    const id = pair.id;
     this.#changingHosts.add(pair.address);
-    const operation = this.#finishPairing(pair, slot, id);
-    this.#finishingPairings.set(id, operation);
-    try {
-      return await operation;
-    } finally {
+    const operation = pair.automatic ? this.#verifyAutomaticPairing(pair, slot) : this.#finishPairing(pair, slot, id);
+    const tracked = operation.finally(() => {
       this.#finishingPairings.delete(id);
       this.#changingHosts.delete(pair.address);
-    }
+    });
+    this.#finishingPairings.set(id, tracked);
+    if (pair.automatic) this.ctx.waitUntil(tracked);
+    return tracked;
+  }
+
+  async #verifyAutomaticPairing(pair: Pairing, slot: string) {
+    if (!pair.fingerprint || !this.env.HOST_PROBE) return { state: 'verification_failed', failure: 'unconfigured' };
+    const host: Host = { address: pair.address, fingerprint: pair.fingerprint, account: pair.account, enrollmentId: pair.id };
+    let check: HostResult = { state: 'check_outcome_unknown', executed: null };
+    try {
+      if (await this.env.HOST_PROBE.saveEnrollmentHost(host)) {
+        check = await this.env.HOST_PROBE.runHostEnrollmentCheck(host);
+      } else {
+        check = { state: 'target_changed', executed: false };
+      }
+    } catch { /* The owner can retry this fixed read-only check. */ }
+    await this.ctx.storage.transaction(async tx => {
+      if (check.state === 'verified') await tx.put('onboarding-host:' + pair.address, host);
+      await tx.put(slot, { ...pair, check });
+    });
+    return check.state === 'verified' ? { state: 'verified', host: pair.addressName ?? pair.address }
+      : { state: 'verification_failed', failure: check.state };
   }
 
   async #finishPairing(pair: Pairing, slot: string, id: string) {
@@ -504,6 +673,12 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
       const script = await store.pairingScript(url.searchParams.get('pair'), auth.slice(7));
       return script ? new Response(script, { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } }) : reject(403);
     }
+    if (path === '/pair-result') {
+      const authorization = request.headers.get('Authorization') ?? '';
+      if (!authorization.startsWith('Bearer ')) return reject(403);
+      const state = await store.pairingReceipt(url.searchParams.get('pair'), authorization.slice(7));
+      return state ? new Response(state + '\n', { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } }) : reject(403);
+    }
     if (path === '/style.css') {
       return new Response(approvalStyles, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
     }
@@ -518,6 +693,16 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (request.method !== 'POST') return reject(405);
   const length = request.headers.get('Content-Length');
   if (!length || !/^\d{1,6}$/.test(length) || Number(length) > 32768) return reject(413);
+  if (path === '/claim-host') {
+    const auth = request.headers.get('Authorization') ?? '';
+    if (!auth.startsWith('Bearer ') || Number(length) > 128 ||
+        request.headers.get('Content-Type')?.split(';', 1)[0].trim() !== 'application/x-www-form-urlencoded') return reject(403);
+    const form = new URLSearchParams(await request.text());
+    const claimed = await store.claimPairing(url.searchParams.get('pair'), auth.slice(7), form.get('address'));
+    return new Response(claimed.script ?? claimed.error + '\n', {
+      status: claimed.status, headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' },
+    });
+  }
   if (path === '/host-pairing') {
     const auth = request.headers.get('Authorization') ?? '';
     const mediaType = request.headers.get('Content-Type')?.split(';', 1)[0].trim();
@@ -533,6 +718,15 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(400);
   const reply = (data: unknown) => Response.json(data, { headers });
+  if (path === '/owner-state') return reply(await store.ownerState());
+  if (path === '/sign-in-options') {
+    const options = await store.signInOptions();
+    return options ? reply(options) : reject(403);
+  }
+  if (path === '/sign-in') {
+    const token = await store.signIn(body.id, body.response as AuthenticationResponseJSON);
+    return token ? reply({ token }) : reject(403);
+  }
   if (path === '/setup-state') {
     const setup = await store.setupState(body.token);
     return setup ? reply(setup) : reject(403);
@@ -542,7 +736,8 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return options ? reply(options) : reject(403);
   }
   if (path === '/enroll') {
-    return await store.enroll(body.token, body.response as RegistrationResponseJSON) ? reply({ enrolled: true }) : reject(403);
+    const token = await store.enroll(body.token, body.response as RegistrationResponseJSON);
+    return token ? reply({ enrolled: true, token }) : reject(403);
   }
   if (path === '/prepare-host') {
     const setup = await store.prepareHost(body.token);
@@ -560,7 +755,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return removed ? reply(removed) : reject(403);
   }
   if (path === '/begin-host-pairing') {
-    const pair = await store.beginPairing(body.token, body.address);
+    const pair = body.address === undefined ? await store.beginAutomaticPairing(body.token) : await store.beginPairing(body.token, body.address);
     return pair ? reply(pair) : reject(403);
   }
   if (path === '/cancel-pairing') {
@@ -568,7 +763,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return result ? reply(result) : reject(403);
   }
   if (path === '/finish-host-pairing') {
-    const result = await store.finishPairing(body.token, body.id);
+    const result = await store.finishPairing(body.token, body.id, body.retry === true);
     return result ? reply(result) : reject(403);
   }
   if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);

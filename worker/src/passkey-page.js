@@ -139,91 +139,108 @@ function hostSetup(token) {
     pendingDevice.hidden = true;
     showStep('host');
     title.textContent = 'Add a host';
-    details.textContent = 'Choose the host you want to enroll.';
+    details.textContent = 'Run the setup command on the Linux machine you want to add. PaSTA will detect it over Tailscale.';
     const command = document.querySelector('#install-command');
-    const address = document.querySelector('#address');
-    const picker = document.querySelector('#device');
-    picker.length = 1;
-    for (const device of result.devices ?? []) {
-      const option = document.createElement('option');
-      option.value = device.address;
-      option.textContent = device.name;
-      picker.append(option);
+    const panel = document.querySelector('#pair-command');
+    const copy = document.querySelector('#copy-install');
+    const script = document.querySelector('#script-preview');
+    const activePair = sessionStorage.getItem('pasta-pair');
+    const failure = 'Could not check the pairing. Try again.';
+
+    async function waitForPair(pairId, retry = false) {
+      for (let attempt = 0; attempt < 360; attempt++) {
+        if (sessionStorage.getItem('pasta-pair') !== pairId) return;
+        const progress = await post('finish-host-pairing', { token, id: pairId, retry });
+        retry = false;
+        if (sessionStorage.getItem('pasta-pair') !== pairId) return;
+        if (progress.state === 'verified') {
+          sessionStorage.removeItem('pasta-pair');
+          panel.hidden = true;
+          title.textContent = 'Host paired and verified';
+          details.textContent = progress.host + ' is ready for maintenance.';
+          status.textContent = '';
+          bind('Add another host', newPair, failure);
+          return;
+        }
+        if (progress.state === 'verification_failed') {
+          panel.hidden = true;
+          const messages = {
+            host_key_unverified: 'The SSH host key did not match. Check that OpenSSH is serving the key on this host.',
+            ssh_authentication_failed: 'The host rejected the SSH key. Check SSH access for the account in the terminal.',
+            diagnostic_failed: 'The SSH check returned an unexpected result. Check the account’s restricted key.',
+            target_changed: 'This address already has a different enrollment. Check the enrolled host before retrying.',
+          };
+          status.textContent = messages[progress.failure] ?? 'PaSTA could not complete the SSH check. Check network access to port 22, then retry.';
+          bind('Retry SSH verification', () => waitForPair(pairId, true), failure);
+          return;
+        }
+        if (progress.state === 'pairing_canceled' || progress.state === 'pairing_expired') {
+          sessionStorage.removeItem('pasta-pair');
+          panel.hidden = true;
+          status.textContent = progress.state === 'pairing_canceled' ? 'Host pairing was canceled in the terminal.'
+            : 'This command expired. Generate a fresh one to continue.';
+          bind('Get a new setup command', newPair, failure);
+          return;
+        }
+        status.textContent = progress.state === 'verifying' ? 'Verifying SSH on ' + (progress.host ?? 'the host') + '…'
+          : progress.state === 'waiting_for_confirmation' ? 'Detected ' + (progress.host ?? 'the host') + '. Confirm pairing in the terminal.'
+          : 'Waiting for you to run the setup command on a host.';
+        await new Promise(resolve => setTimeout(resolve, 2500));
+      }
+      bind('Check pairing status', () => waitForPair(pairId), failure);
     }
-    document.querySelector('#device-picker').hidden = !result.devices?.length;
-    const targetAddress = () => picker.value || address.value.trim();
-    let updateGrant = () => {};
-    if (result.deviceTag) {
-      const grant = document.querySelector('#grant-policy');
-      updateGrant = () => {
-        grant.value = JSON.stringify({
-          grants: [{ src: [result.deviceTag], dst: [targetAddress() || '<host Tailscale IPv4>'], ip: ['tcp:22'] }],
-        }, null, 2);
+
+    async function newPair() {
+      const pair = await post('begin-host-pairing', { token });
+      sessionStorage.setItem('pasta-pair', pair.id);
+      title.textContent = 'Add a host';
+      details.textContent = 'Run this command on the Linux host you want to add. Confirm the detected device in the terminal.';
+      command.value = pair.installCommand;
+      panel.hidden = false;
+      copy.textContent = 'Copy command';
+      script.value = '';
+      script.parentElement.open = false;
+      script.parentElement.ontoggle = async () => {
+        if (!script.parentElement.open || script.value) return;
+        try {
+          const response = await fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + pair.download.token } });
+          if (!response.ok) throw new Error();
+          script.value = await response.text();
+        } catch {
+          script.value = 'Could not load the script. Generate a fresh command and try again.';
+        }
       };
-      address.oninput = updateGrant;
-      updateGrant();
-      document.querySelector('#host-grant').hidden = false;
+      copy.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(command.value);
+          copy.textContent = 'Copied';
+        } catch {
+          command.select();
+        }
+      };
+      bind('Replace setup command', async () => {
+        await post('cancel-pairing', { token, id: pair.id });
+        await newPair();
+      }, failure);
+      void waitForPair(pair.id).catch(() => {
+        if (sessionStorage.getItem('pasta-pair') !== pair.id) return;
+        status.textContent = failure;
+        bind('Check pairing status', () => waitForPair(pair.id), failure);
+      });
     }
-    picker.onchange = () => {
-      document.querySelector('#manual-address').hidden = Boolean(picker.value);
-      updateGrant();
-    };
-    document.querySelector('#host-settings').hidden = false;
-    bind('Get host setup command', async () => {
-      const pair = await post('begin-host-pairing', { token, address: targetAddress() });
-      if (pair.installCommand) {
-        command.value = pair.installCommand;
-        const commandPanel = document.querySelector('#pair-command');
-        commandPanel.hidden = false;
-        const copy = document.querySelector('#copy-install');
-        const script = document.querySelector('#script-preview');
-        script.value = '';
-        script.parentElement.ontoggle = async () => {
-          if (!script.parentElement.open || script.value) return;
-          if (!pair.download) return;
-          try {
-            const response = await fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + pair.download.token } });
-            if (!response.ok) throw new Error();
-            script.value = await response.text();
-          } catch {
-            script.value = 'Could not load the script. Generate a fresh command and try again.';
-          }
-        };
-        copy.onclick = async () => {
-          try {
-            await navigator.clipboard.writeText(command.value);
-            copy.textContent = 'Copied';
-          } catch {
-            command.select();
-          }
-        };
-        title.textContent = 'Pair the selected host';
-        details.textContent = 'The installer asks whether to create or use the ' + pair.account + ' account. It then sends the host fingerprint back here.';
-      }
-      document.querySelector('#host-settings').hidden = true;
-      action.hidden = true;
-      status.textContent = 'Waiting for the command to finish on the selected host. If it fails, check the message in that terminal.';
-      let pairingCanceled = false;
-      for (let attempt = 0; attempt < 180; attempt++) {
-        const job = await post('finish-host-pairing', { token, id: pair.id });
-        if (job.review_url) {
-          location.assign(job.review_url);
-          return;
-        }
-        if (job.state === 'pairing_canceled') { pairingCanceled = true; break; }
-        if (job.state === 'pairing_expired') break;
-        if (job.state !== 'waiting_for_host') {
-          status.textContent = 'Host check status: ' + job.state + '.';
-          return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 5000));
-      }
-      document.querySelector('#pair-command').hidden = true;
-      status.textContent = pairingCanceled ? 'Host pairing was canceled in the terminal.'
-        : 'This command has expired or was replaced. Generate a fresh one to continue.';
-      action.hidden = false;
-      bind('Generate a new command', connect, 'Could not refresh the host list. Try again.');
-    }, 'Host setup did not complete. Reload the page to retry.');
+
+    if (activePair) {
+      bind('Get a new setup command', async () => {
+        await post('cancel-pairing', { token, id: activePair });
+        await newPair();
+      }, failure);
+      void waitForPair(activePair).catch(() => {
+        status.textContent = failure;
+        bind('Check pairing status', () => waitForPair(activePair), failure);
+      });
+    } else {
+      bind('Get host setup command', newPair, 'Could not generate a setup command. Try again.');
+    }
   }
   const failure = 'Could not connect to Tailscale. Check the setup code and probe configuration, then retry.';
   action.textContent = 'Checking Tailscale connection…';
@@ -237,38 +254,49 @@ function hostSetup(token) {
 if (location.pathname.endsWith('/onboard')) {
   showStep('access');
   title.textContent = 'Set up maintenance access';
-  details.textContent = 'Enter your setup code to get started or pick up where you left off.';
-  setup.hidden = false;
-  setup.onsubmit = event => {
-    event.preventDefault();
-    action.click();
-  };
-  tokenInput.addEventListener('keydown', event => {
-    if (event.key === 'Enter') { event.preventDefault(); action.click(); }
-  });
-  bind('Continue', async () => {
-    const token = tokenInput.value.trim();
-    if (!token) {
-      tokenInput.reportValidity();
-      action.disabled = false;
-      return;
-    }
-    const { enrolled } = await post('setup-state', { token });
+  details.textContent = 'Checking whether your owner passkey is registered…';
+  async function chooseOwnerFlow() {
+    const { enrolled } = await post('owner-state', {});
     if (enrolled) {
-      hostSetup(token);
+      title.textContent = 'Sign in to PaSTA';
+      details.textContent = 'Use your passkey to continue setup or manage enrolled hosts.';
+      bind('Sign in with passkey', async () => {
+        const { id, options: optionsJSON } = await post('sign-in-options', {});
+        const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
+        const { token } = await post('sign-in', { id, response });
+        hostSetup(token);
+      }, 'Passkey sign-in didn’t complete. Try again.');
       return;
     }
-    const optionsJSON = await post('enrollment-options', { token });
-    setup.hidden = true;
-    tokenInput.value = '';
-    title.textContent = 'Create your passkey';
-    details.textContent = 'Use your device’s passkey prompt. You’ll use this passkey to approve maintenance jobs.';
-    bind('Create passkey', async () => {
-      const response = await SimpleWebAuthnBrowser.startRegistration({ optionsJSON });
-      await post('enroll', { token, response });
-      hostSetup(token);
-    }, 'Passkey setup did not complete. You can retry or refresh for a new request.');
-  }, 'That setup code did not work. Check the code and try again.');
+    details.textContent = 'Enter your setup code to register the owner passkey.';
+    setup.hidden = false;
+    setup.onsubmit = event => {
+      event.preventDefault();
+      action.click();
+    };
+    bind('Continue', async () => {
+      const token = tokenInput.value.trim();
+      if (!token) {
+        tokenInput.reportValidity();
+        action.disabled = false;
+        return;
+      }
+      const optionsJSON = await post('enrollment-options', { token });
+      setup.hidden = true;
+      tokenInput.value = '';
+      title.textContent = 'Create your passkey';
+      details.textContent = 'Use your device’s passkey prompt to set up PaSTA.';
+      bind('Create passkey', async () => {
+        const response = await SimpleWebAuthnBrowser.startRegistration({ optionsJSON });
+        const owner = await post('enroll', { token, response });
+        hostSetup(owner.token);
+      }, 'Passkey setup did not complete. You can retry or refresh for a new request.');
+    }, 'That setup code did not work. Check the code and try again.');
+  }
+  void chooseOwnerFlow().catch(() => {
+    status.textContent = 'Could not load setup. Try again.';
+    bind('Retry', chooseOwnerFlow, 'Could not load setup. Try again.');
+  });
 } else {
   const job = new URLSearchParams(location.search).get('job');
   post('review-options', { job }).then(({ options: optionsJSON, job: request }) => {

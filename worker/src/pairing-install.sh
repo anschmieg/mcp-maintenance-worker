@@ -31,7 +31,7 @@ pair_host() {
   fi
 
   printf '\n  %sPaSTA  /  Pair a host%s\n\n' "$accent" "$reset" >&3
-  printf '  Host      %s\n  Account   %s\n\n' "$target_address" "$account" >&3
+  printf '  Host      %s (%s)\n  Account   %s\n\n' "$target_name" "$target_address" "$account" >&3
 
   if ! tailscale ip -4 | grep -Fxq -- "$target_address"; then
     note 'This machine does not match the selected Tailscale address.'
@@ -69,7 +69,7 @@ pair_host() {
         printf '\n' >&3
         note 'PaSTA installs one restricted SSH key for the dedicated account.'
         note 'It sends this machine’s SSH fingerprint to the setup page.'
-        note 'The next step is a passkey-approved SSH verification.'
+        note 'PaSTA checks the restricted SSH connection before adding the host.'
         printf '\n' >&3
         ;;
       ''|3)
@@ -101,7 +101,28 @@ pair_host() {
     note 'The setup page did not confirm receipt. Check the page before trying again.'
     return 1
   fi
-  printf '\n  %sHost paired%s\n  Return to the setup page to verify SSH with your passkey.\n\n' "$accent" "$reset" >&3
+  if [ -z "$result_url" ]; then
+    note 'SSH key installed. Continue on the setup page.'
+    return 0
+  fi
+  note 'Verifying the restricted SSH connection…'
+  count=0
+  while [ "$count" -lt 12 ]; do
+    result=$(curl -fsS --max-time 4 -H "Authorization: Bearer $pairing_token" "$result_url") || break
+    case "$result" in
+      verified)
+        printf '\n  %sPaired and verified%s\n\n' "$accent" "$reset" >&3
+        return 0
+        ;;
+      verification_failed)
+        note 'The key was installed, but SSH verification failed. See the setup page for details and retry.'
+        return 1
+        ;;
+    esac
+    count=$((count + 1))
+    sleep 2
+  done
+  note 'SSH verification is still pending. Check the setup page for the result.'
 }
 
 pair_host
