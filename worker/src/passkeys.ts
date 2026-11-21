@@ -7,6 +7,7 @@ import {
 } from '@simplewebauthn/server';
 import browserBundle from './passkey-browser.txt';
 import approvalPage from './passkey-page.html';
+import approvalStyles from './passkey-page.css';
 import { sameEnrollmentHost, restartUnit, validEnrollmentHost, validTailnetIpv4, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
@@ -78,6 +79,11 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const testLifetime = Number(this.env.PASSKEY_LOCAL_TEST_JOB_TTL_MS);
     return passkeyOrigin(this.env)?.protocol === 'http:' &&
       Number.isSafeInteger(testLifetime) && testLifetime > 0 && testLifetime < lifetime ? testLifetime : lifetime;
+  }
+
+  async setupState(token: unknown) {
+    if (!setupAuthorized(this.env, token)) return null;
+    return { enrolled: Boolean(await this.#credential()) };
   }
 
   async enrollmentOptions(token: unknown) {
@@ -190,8 +196,6 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async #beginPairing(token: unknown, address: string) {
     const probe = await this.prepareHost(token);
     if (probe?.state !== 'connected') return null;
-    const installCommand = await this.env.HOST_PROBE?.prepareHostKey(address).catch(() => null);
-    if (!installCommand) return null;
     const callbackToken = crypto.randomUUID() + crypto.randomUUID();
     const id = crypto.randomUUID();
     const pairing = await this.ctx.storage.transaction(async tx => {
@@ -207,14 +211,41 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     });
     if (!pairing) return null;
     if (pairing.fingerprint) return { id: pairing.id };
-    const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
+    const url = new URL('/setup', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
     return {
-      id, installCommand: installCommand + ' &&\n' +
-        '  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk \'{print $2}\') &&\n' +
-        '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
-        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url.href),
+      id,
+      download: { url: url.href, token: callbackToken },
+      installCommand: 'curl -fsS -H ' + shellQuote('Authorization: Bearer ' + callbackToken) +
+        ' ' + shellQuote(url.href) + ' | sh',
     };
+  }
+
+  async pairingScript(id: string | null, token: string) {
+    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
+    const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
+    if (!pair || pair.fingerprint || pair.expires <= Date.now() ||
+        !timingSafeEqual(Buffer.from(pair.tokenHash), Buffer.from(hashToken(token)))) return null;
+    const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address).catch(() => null);
+    if (!install) return null;
+    const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
+    url.searchParams.set('pair', id);
+    return [
+      '#!/bin/sh',
+      'pair_host() {',
+      '  if [ "$(id -un)" != openbot-tailnet-probe ]; then',
+      "    printf '%s\n' 'Run this command as the openbot-tailnet-probe user.' >&2",
+      '    return 1',
+      '  fi',
+      "  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}') &&",
+      '  case "$fingerprint" in SHA256:*) ;; *) return 1;; esac &&',
+      '  ' + install + ' &&',
+      '  curl -fsS -H ' + shellQuote('Authorization: Bearer ' + token) +
+        ' --data-urlencode "fingerprint=$fingerprint" ' + shellQuote(url.href),
+      '}',
+      'pair_host',
+      '',
+    ].join('\n');
   }
 
   async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown) {
@@ -430,7 +461,7 @@ export const approvalStore = (env: PasskeyEnv) => env.PASSKEYS.getByName('owner-
 
 const headers = {
   'Cache-Control': 'no-store',
-  'Content-Security-Policy': "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
   'Referrer-Policy': 'no-referrer',
   'X-Content-Type-Options': 'nosniff',
 };
@@ -443,6 +474,15 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const store = approvalStore(env);
   const path = url.pathname.slice(prefix.length);
   if (request.method === 'GET') {
+    if (url.pathname === '/setup') {
+      const auth = request.headers.get('Authorization') ?? '';
+      if (!auth.startsWith('Bearer ')) return reject(403);
+      const script = await store.pairingScript(url.searchParams.get('pair'), auth.slice(7));
+      return script ? new Response(script, { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } }) : reject(403);
+    }
+    if (path === '/style.css') {
+      return new Response(approvalStyles, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
+    }
     if (path === '/onboard' || path === '/review') {
       return new Response(approvalPage, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
     }
@@ -468,6 +508,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(400);
   const reply = (data: unknown) => Response.json(data, { headers });
+  if (path === '/setup-state') {
+    const setup = await store.setupState(body.token);
+    return setup ? reply(setup) : reject(403);
+  }
   if (path === '/enrollment-options') {
     const options = await store.enrollmentOptions(body.token);
     return options ? reply(options) : reject(403);

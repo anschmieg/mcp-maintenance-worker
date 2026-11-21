@@ -4,6 +4,15 @@ const setup = document.querySelector('#setup');
 const tokenInput = document.querySelector('#token');
 const action = document.querySelector('#action');
 const status = document.querySelector('#status');
+const steps = document.querySelector('#steps');
+
+function showStep(name) {
+  steps.hidden = false;
+  for (const step of steps.querySelectorAll('[data-step]')) {
+    if (step.dataset.step === name) step.setAttribute('aria-current', 'step');
+    else step.removeAttribute('aria-current');
+  }
+}
 
 async function post(path, body) {
   const response = await fetch('/passkeys/' + path, {
@@ -31,10 +40,10 @@ function bind(label, run, failure) {
 }
 
 function hostSetup(token) {
+  showStep('tailnet');
   title.textContent = 'Connect Tailscale';
   details.textContent = 'Sign in to add the Worker as a device on your tailnet. It inherits the network access your Tailscale policy gives devices signed in as you. SSH pairing is required separately.';
   setup.hidden = true;
-  document.querySelector('#resume').hidden = true;
   tokenInput.value = '';
   const guide = document.querySelector('#tailnet-guide');
   const pendingDevice = document.querySelector('#pending-device');
@@ -115,22 +124,26 @@ function hostSetup(token) {
           : result.deviceTag ? 'Waiting for the tagged device. If device approval is required, approve it in Tailscale Machines.'
             : 'Waiting for Tailscale to connect…';
       login.hidden = !result.loginUrl;
+      action.hidden = Boolean(result.loginUrl) || Boolean(result.needsDeviceApproval);
       if (result.loginUrl) login.href = result.loginUrl;
       pendingDevice.hidden = !result.needsDeviceApproval && !result.deviceTag;
       await new Promise(resolve => setTimeout(resolve, 5000));
       result = await post('prepare-host', { token });
     }
+    action.hidden = false;
     if (result.state !== 'connected') {
       bind('Check Tailscale connection', connect, 'Could not check the connection. Try again.');
       return;
     }
     login.hidden = true;
     pendingDevice.hidden = true;
-    title.textContent = 'Add a pilot host';
+    showStep('host');
+    title.textContent = 'Add a host';
     details.textContent = 'Choose the host you want to enroll.';
     const command = document.querySelector('#install-command');
     const address = document.querySelector('#address');
     const picker = document.querySelector('#device');
+    picker.length = 1;
     for (const device of result.devices ?? []) {
       const option = document.createElement('option');
       option.value = device.address;
@@ -160,9 +173,22 @@ function hostSetup(token) {
       const pair = await post('begin-host-pairing', { token, address: targetAddress() });
       if (pair.installCommand) {
         command.value = pair.installCommand;
-        command.hidden = false;
+        const commandPanel = document.querySelector('#pair-command');
+        commandPanel.hidden = false;
         const copy = document.querySelector('#copy-install');
-        copy.hidden = false;
+        const script = document.querySelector('#script-preview');
+        script.value = '';
+        script.parentElement.ontoggle = async () => {
+          if (!script.parentElement.open || script.value) return;
+          if (!pair.download) return;
+          try {
+            const response = await fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + pair.download.token } });
+            if (!response.ok) throw new Error();
+            script.value = await response.text();
+          } catch {
+            script.value = 'Could not load the script. Generate a fresh command and try again.';
+          }
+        };
         copy.onclick = async () => {
           try {
             await navigator.clipboard.writeText(command.value);
@@ -171,9 +197,11 @@ function hostSetup(token) {
             command.select();
           }
         };
-        details.textContent = 'Run this command on the selected host as the dedicated SSH account openbot-tailnet-probe. It installs the public key and sends the host fingerprint back here.';
+        title.textContent = 'Pair the selected host';
+        details.textContent = 'The setup script installs the restricted SSH key and sends the host fingerprint back here.';
       }
       document.querySelector('#host-settings').hidden = true;
+      action.hidden = true;
       status.textContent = 'Waiting for the host…';
       for (let attempt = 0; attempt < 180; attempt++) {
         const job = await post('finish-host-pairing', { token, id: pair.id });
@@ -200,24 +228,40 @@ function hostSetup(token) {
 }
 
 if (location.pathname.endsWith('/onboard')) {
-  title.textContent = 'Create your maintenance passkey';
-  details.textContent = 'Enter the one-time code, then save the passkey in your device’s password manager.';
+  showStep('access');
+  title.textContent = 'Set up maintenance access';
+  details.textContent = 'Enter your setup code to get started or pick up where you left off.';
   setup.hidden = false;
-  const resume = document.querySelector('#resume');
-  resume.hidden = false;
-  resume.onclick = () => hostSetup(tokenInput.value);
+  setup.onsubmit = event => {
+    event.preventDefault();
+    action.click();
+  };
+  tokenInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); action.click(); }
+  });
   bind('Continue', async () => {
-    const token = tokenInput.value;
+    const token = tokenInput.value.trim();
+    if (!token) {
+      tokenInput.reportValidity();
+      action.disabled = false;
+      return;
+    }
+    const { enrolled } = await post('setup-state', { token });
+    if (enrolled) {
+      hostSetup(token);
+      return;
+    }
     const optionsJSON = await post('enrollment-options', { token });
     setup.hidden = true;
-    resume.hidden = true;
     tokenInput.value = '';
+    title.textContent = 'Create your passkey';
+    details.textContent = 'Use your device’s passkey prompt. You’ll use this passkey to approve maintenance jobs.';
     bind('Create passkey', async () => {
       const response = await SimpleWebAuthnBrowser.startRegistration({ optionsJSON });
       await post('enroll', { token, response });
       hostSetup(token);
-    }, 'Passkey setup did not complete. Retry or reload to enter the setup code again.');
-  }, 'The setup code was rejected or a passkey is already registered.');
+    }, 'Passkey setup did not complete. You can retry or refresh for a new request.');
+  }, 'That setup code did not work. Check the code and try again.');
 } else {
   const job = new URLSearchParams(location.search).get('job');
   post('review-options', { job }).then(({ options: optionsJSON, job: request }) => {

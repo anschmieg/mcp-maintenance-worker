@@ -49,6 +49,12 @@ const job = randomUUID();
 assert.equal((await call('start_passkey_test', job)).state, 'enrollment_required');
 assert.equal((await post('enrollment-options', { token: mcpToken })).status, 403);
 assert.equal((await post('prepare-host', { token: setupToken })).status, 403);
+assert.equal((await post('setup-state', { token: mcpToken })).status, 403);
+assert.deepEqual(await (await post('setup-state', { token: setupToken })).json(), { enrolled: false });
+const css = await fetch(origin + '/passkeys/style.css');
+assert.match(css.headers.get('Content-Type'), /^text\/css/u);
+assert.match(await css.text(), /@media/u);
+assert.doesNotMatch(await (await fetch(origin + '/passkeys/onboard')).text(), /Continue host setup/u);
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken }, 'https://other.example')).status, 403);
 assert.equal((await fetch(origin + '/passkeys/onboard')).status, 200);
@@ -81,6 +87,7 @@ const registration = {
   },
 };
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 200);
+assert.deepEqual(await (await post('setup-state', { token: setupToken })).json(), { enrolled: true });
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
@@ -120,9 +127,17 @@ const { pinned: hostPin } = await (await fetch(fixture + '/attempts')).json();
 assert.equal((await post('begin-host-pairing', { token: mcpToken, address })).status, 403);
 assert.equal((await post('begin-host-pairing', { token: setupToken, address: '127.0.0.1' })).status, 403);
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
-assert.match(pair.installCommand, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
-execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
-const callbackToken = pair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sh$/u);
+assert.equal(pair.installCommand.split('\n').length, 1);
+async function downloadPairingScript(pair, token = pair.download.token) {
+  return fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + token } });
+}
+assert.equal((await fetch(pair.download.url)).status, 403);
+assert.equal((await downloadPairingScript(pair, mcpToken)).status, 403);
+const install = await (await downloadPairingScript(pair)).text();
+assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
+execFileSync('/bin/sh', ['-n', '-c', install]);
+const callbackToken = pair.download.token;
 function hostCallback(token, fingerprint, pairing = pair.id) {
   return fetch(origin + '/passkeys/host-pairing?pair=' + pairing, {
     method: 'POST', headers: { Authorization: 'Bearer ' + token },
@@ -135,6 +150,7 @@ assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, i
   { state: 'waiting_for_host' });
 assert.equal((await hostCallback(callbackToken, hostPin)).status, 200);
 assert.equal((await hostCallback(callbackToken, hostPin)).status, 403);
+assert.equal((await downloadPairingScript(pair)).status, 403);
 assert.equal((await post('finish-host-pairing', { token: mcpToken, id: pair.id })).status, 403);
 const hostSetup = await (await post('finish-host-pairing', { token: setupToken, id: pair.id })).json();
 assert.equal(hostSetup.state, 'pending');
@@ -240,8 +256,9 @@ const alternateAddress = '100.64.0.3';
 const alternatePair = await (await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).json();
 assert.notEqual(alternatePair.id, pair.id);
 const installedPublicKey = command => command.match(/ssh-ed25519 [A-Za-z0-9+/]+/u)[0];
-assert.notEqual(installedPublicKey(alternatePair.installCommand), installedPublicKey(pair.installCommand));
-const alternateToken = alternatePair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+const alternateInstall = await (await downloadPairingScript(alternatePair)).text();
+assert.notEqual(installedPublicKey(alternateInstall), installedPublicKey(install));
+const alternateToken = alternatePair.download.token;
 assert.equal((await hostCallback(alternateToken, hostPin, pair.id)).status, 403);
 assert.equal((await hostCallback(alternateToken, hostPin, alternatePair.id)).status, 200);
 const alternateSetup = await (await post('finish-host-pairing', { token: setupToken, id: alternatePair.id })).json();
@@ -281,8 +298,9 @@ await fetch(fixture + '/mode/normal', { method: 'POST' });
 assert.deepEqual(await (await post('remove-host', { token: setupToken, address: alternateAddress })).json(),
   { state: 'removed' });
 const newPair = await (await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).json();
-assert.notEqual(installedPublicKey(newPair.installCommand), installedPublicKey(alternatePair.installCommand));
-const newToken = newPair.installCommand.match(/Authorization: Bearer ([0-9a-f-]{72})/u)[1];
+const newInstall = await (await downloadPairingScript(newPair)).text();
+assert.notEqual(installedPublicKey(newInstall), installedPublicKey(alternateInstall));
+const newToken = newPair.download.token;
 assert.equal((await hostCallback(newToken, hostPin, newPair.id)).status, 200);
 assert.equal((await (await post('finish-host-pairing', { token: setupToken, id: newPair.id })).json()).host, alternateAddress);
 const staleAssertion = assertion(0x05, origin, staleReview.options.challenge);

@@ -101,7 +101,8 @@ const transport=MaintenanceAgent.serve('/mcp');
 export default {
   async fetch(request:Request, env:Env, ctx:ExecutionContext) {
     const token=env.MCP_BEARER_TOKEN;
-    if (new URL(request.url).pathname.startsWith('/passkeys/')) {
+    const path = new URL(request.url).pathname;
+    if (path.startsWith('/passkeys/') || path === '/setup') {
       if (env.PASSKEY_SETUP_TOKEN && env.PASSKEY_SETUP_TOKEN === token) return new Response(null, { status: 503 });
       return passkeyRoute(request, env);
     }
