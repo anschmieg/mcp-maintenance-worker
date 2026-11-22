@@ -262,13 +262,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   #pairingCommand(id: string, account: HostAccount, pairingToken: string) {
     const url = new URL('/setup', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
-    // Keep sudo's stdin on the terminal so its PTY relays interactive input.
+    // Run the menu as the invoking user with the terminal on stdin.
     const launcher = [
       'if ! [ -t 0 ]; then echo "Run this command in an interactive terminal." >&2; exit 1; fi',
       'installer=$(mktemp) || exit 1',
       'trap \'rm -f -- "$installer"\' EXIT',
       'trap \'exit 1\' HUP INT TERM',
-      'curl -fsS -o "$installer" -H "$1" "$2" && sudo sh "$installer"',
+      'curl -fsS -o "$installer" -H "$1" "$2" && sh "$installer"',
     ].join('; ');
     return {
       id, account, download: { url: url.href, token: pairingToken },

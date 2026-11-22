@@ -7,6 +7,14 @@ note() {
   printf '  %s\n' "$1" >&3
 }
 
+as_admin() {
+  if [ "$(id -u)" = 0 ]; then
+    "$@"
+  else
+    sudo -- "$@"
+  fi
+}
+
 pair_host() {
   PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
   export PATH
@@ -14,15 +22,11 @@ pair_host() {
     echo 'Run this command in a terminal on the selected Linux host.' >&2
     return 1
   fi
-  if [ "$(id -u)" != 0 ]; then
-    echo 'Administrator permission is required. Copy the complete command from setup.' >&2
-    return 1
-  fi
-  if ! (true </dev/tty) 2>/dev/null; then
+  if ! [ -t 0 ]; then
     echo 'Open an interactive terminal on the selected host and run the setup command again.' >&2
     return 1
   fi
-  exec 3<>/dev/tty
+  exec 3>&2
   accent=''
   reset=''
   if [ -n "${TERM:-}" ] && [ "$TERM" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
@@ -38,19 +42,10 @@ pair_host() {
     note 'Connect to the selected machine and run the command there.'
     return 1
   fi
-  fingerprint=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')
-  case "$fingerprint" in
-    SHA256:*) ;;
-    *)
-      note 'No SSH host key found. Enable OpenSSH Server here, then run the command again.'
-      return 1
-      ;;
-  esac
-
   while :; do
     printf '  %s1%s  Use the dedicated %s account (create if needed)\n' "$accent" "$reset" "$account" >&3
     printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [4]: ' >&3
-    if ! IFS= read -r answer <&3; then answer=''; fi
+    if ! IFS= read -r answer; then answer=''; fi
     case "$answer" in
       1)
         if account_uid=$(id -u "$account" 2>/dev/null); then
@@ -66,7 +61,7 @@ pair_host() {
         ;;
       2)
         printf '\n  Existing login name (Enter to go back): ' >&3
-        if ! IFS= read -r selected_account <&3 || [ -z "$selected_account" ]; then continue; fi
+        if ! IFS= read -r selected_account || [ -z "$selected_account" ]; then continue; fi
         case "$selected_account" in
           root|[!a-zA-Z_]*|*[!a-zA-Z0-9_.-]*)
             note 'Enter a valid non-root login name.'
@@ -79,7 +74,7 @@ pair_host() {
           continue
         fi
         printf '  Install the restricted PaSTA SSH key for %s? [y/N] ' "$selected_account" >&3
-        if ! IFS= read -r confirm <&3; then continue; fi
+        if ! IFS= read -r confirm; then continue; fi
         case "$confirm" in y|Y|yes|YES) ;; *) continue ;; esac
         account="$selected_account"
         account_action=existing
@@ -107,15 +102,24 @@ pair_host() {
   done
 
   printf '\n' >&3
+  fingerprint=$(as_admin ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')
+  case "$fingerprint" in
+    SHA256:*) ;;
+    *)
+      note 'No SSH host key found. Enable OpenSSH Server here, then run the command again.'
+      return 1
+      ;;
+  esac
+
   if [ "$account_action" = created ]; then
     note 'Creating the dedicated account…'
-    if ! useradd --system --create-home --home-dir /var/lib/"$account" --shell /bin/sh "$account"; then
+    if ! as_admin useradd --system --create-home --home-dir /var/lib/"$account" --shell /bin/sh "$account"; then
       note 'Account creation failed. Check the error above, then rerun the command.'
       return 1
     fi
   fi
   note 'Installing the restricted SSH key…'
-  if ! runuser -u "$account" -- /bin/sh -c "$install_command" pasta-install "$account"; then
+  if ! as_admin runuser -u "$account" -- /bin/sh -c "$install_command" pasta-install "$account"; then
     note 'Could not install the SSH key. Check the error above, then rerun the command.'
     return 1
   fi

@@ -158,7 +158,7 @@ assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, i
 });
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
 assert.equal(pair.account, 'pasta-mcp');
-assert.match(pair.installCommand, /^sh -c .*\[ -t 0 \].*curl -fsS -o "\$installer".* && sudo sh "\$installer".*\/setup\?pair=/u);
+assert.match(pair.installCommand, /^sh -c .*\[ -t 0 \].*curl -fsS -o "\$installer".* && sh "\$installer".*\/setup\?pair=/u);
 execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
 assert.equal(pair.installCommand.split('\n').length, 1);
 async function downloadPairingScript(pair, token = pair.download.token) {
@@ -170,7 +170,7 @@ const install = await (await downloadPairingScript(pair)).text();
 assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
 assert.match(install, /account='pasta-mcp'/u);
 assert.match(install, /useradd --system --create-home/u);
-assert.ok(install.includes('read -r answer <&3'));
+assert.match(install, /read -r answer;/u);
 assert.match(install, /Show what setup installs/u);
 assert.match(install, /Choice \[4\]/u);
 assert.ok(install.includes('runuser -u "$account"'));
