@@ -158,7 +158,8 @@ assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, i
 });
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
 assert.equal(pair.account, 'pasta-mcp');
-assert.match(pair.installCommand, /^curl .*\/setup\?pair=.* \| sudo sh$/u);
+assert.match(pair.installCommand, /^sh -c .*\[ -t 0 \].*curl -fsS -o "\$installer".* && sudo sh "\$installer".*\/setup\?pair=/u);
+execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
 assert.equal(pair.installCommand.split('\n').length, 1);
 async function downloadPairingScript(pair, token = pair.download.token) {
   return fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + token } });
