@@ -15,6 +15,57 @@ as_admin() {
   fi
 }
 
+# Both tools write the selection to stderr and draw the menu on stdout.
+terminal_menu() {
+  "$menu_tool" --title 'PaSTA / Pair a host' "$@" 3>&1 1>&2 2>&3
+}
+
+login_accounts() {
+  getent passwd | awk -F: -v dedicated="$account" '
+    $1 != dedicated && $1 != "root" && $1 ~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ &&
+    length($1) <= 32 && $3 > 0 && $7 ~ /^\// && $7 !~ /\/(false|nologin|sync|halt|shutdown)$/ {
+      if ($3 >= 1000 && regular_count < 10) regular[++regular_count] = $1
+      if ($3 < 1000 && other_count < 10) other[++other_count] = $1
+    }
+    END {
+      for (i = 1; i <= regular_count; i++) print regular[i]
+      for (i = 1; i <= other_count && regular_count + i <= 10; i++) print other[i]
+    }
+  '
+}
+
+choose_login() {
+  logins=$(login_accounts)
+  if [ -n "$menu_tool" ]; then
+    set -- + 'Enter another username'
+    if [ -n "$logins" ]; then
+      while IFS= read -r login; do
+        set -- "$@" "$login" ''
+      done <<EOF
+$logins
+EOF
+    fi
+    choice=$(terminal_menu --default-item + --menu 'Choose a login account' 20 68 11 "$@") || return 1
+    case "$choice" in
+      +) terminal_menu --inputbox 'Enter an existing login name' 9 60 ;;
+      *) printf '%s\n' "$choice" ;;
+    esac
+    return
+  fi
+  if [ -n "$logins" ]; then
+    note 'Available logins (up to 10):'
+    while IFS= read -r login; do
+      printf '    %s\n' "$login" >&3
+    done <<EOF
+$logins
+EOF
+  else
+    note 'No login accounts were listed. You can still enter a username.'
+  fi
+  printf '\n  Existing login name (Enter to go back): ' >&3
+  IFS= read -r login && printf '%s\n' "$login"
+}
+
 pair_host() {
   PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
   export PATH
@@ -27,6 +78,19 @@ pair_host() {
     return 1
   fi
   exec 3>&2
+  menu_tool=''
+  if [ -t 2 ] && [ -n "${TERM:-}" ] && [ "$TERM" != dumb ]; then
+    terminal_size=$(stty size 2>/dev/null) || terminal_size=''
+    set -- $terminal_size
+    if [ "$#" = 2 ] && [ "$1" -ge 22 ] && [ "$2" -ge 72 ]; then
+      for candidate in whiptail dialog; do
+        if command -v "$candidate" >/dev/null && "$candidate" --version >/dev/null 2>&1; then
+          menu_tool=$candidate
+          break
+        fi
+      done
+    fi
+  fi
   accent=''
   reset=''
   if [ -n "${TERM:-}" ] && [ "$TERM" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
@@ -43,9 +107,15 @@ pair_host() {
     return 1
   fi
   while :; do
-    printf '  %s1%s  Use the dedicated %s account (create if needed)\n' "$accent" "$reset" "$account" >&3
-    printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [4]: ' >&3
-    if ! IFS= read -r answer; then answer=''; fi
+    if [ -n "$menu_tool" ]; then
+      answer=$(terminal_menu --default-item 4 --menu "Host: $target_name ($target_address)" 16 70 4 \
+        1 "Use the dedicated $account account (create if needed)" \
+        2 'Use an existing login account' 3 'Show what setup installs' 4 'Cancel') || answer=4
+    else
+      printf '  %s1%s  Use the dedicated %s account (create if needed)\n' "$accent" "$reset" "$account" >&3
+      printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [4]: ' >&3
+      if ! IFS= read -r answer; then answer=''; fi
+    fi
     case "$answer" in
       1)
         if account_uid=$(id -u "$account" 2>/dev/null); then
@@ -60,8 +130,7 @@ pair_host() {
         break
         ;;
       2)
-        printf '\n  Existing login name (Enter to go back): ' >&3
-        if ! IFS= read -r selected_account || [ -z "$selected_account" ]; then continue; fi
+        if ! selected_account=$(choose_login) || [ -z "$selected_account" ]; then continue; fi
         case "$selected_account" in
           root|[!a-zA-Z_]*|*[!a-zA-Z0-9_.-]*)
             note 'Enter a valid non-root login name.'
@@ -73,21 +142,28 @@ pair_host() {
           note 'Choose an existing login with a nonzero user ID.'
           continue
         fi
-        printf '  Install the restricted PaSTA SSH key for %s? [y/N] ' "$selected_account" >&3
-        if ! IFS= read -r confirm; then continue; fi
-        case "$confirm" in y|Y|yes|YES) ;; *) continue ;; esac
+        if [ -n "$menu_tool" ]; then
+          "$menu_tool" --title 'PaSTA / Pair a host' --defaultno --yesno \
+            "Install the restricted PaSTA SSH key for $selected_account?" 9 66 >&2 || continue
+        else
+          printf '  Install the restricted PaSTA SSH key for %s? [y/N] ' "$selected_account" >&3
+          if ! IFS= read -r confirm; then continue; fi
+          case "$confirm" in y|Y|yes|YES) ;; *) continue ;; esac
+        fi
         account="$selected_account"
         account_action=existing
         break
         ;;
       3)
-        printf '\n' >&3
-        note 'PaSTA installs one restricted SSH key for the account you choose.'
-        note 'The key allows only the pairing check and the fixed maintenance operation.'
-        note 'Maintenance needs passkey approval and uses the account’s existing sudo policy.'
-        note 'It sends this machine’s SSH fingerprint to the setup page.'
-        note 'PaSTA checks the restricted SSH connection before adding the host.'
-        printf '\n' >&3
+        details='PaSTA installs one restricted SSH key for the account you choose.
+The key allows only the pairing check and the fixed maintenance operation.
+Maintenance needs passkey approval and uses the account’s existing sudo policy.
+PaSTA sends this machine’s SSH fingerprint to the Worker and checks the restricted SSH connection.'
+        if [ -n "$menu_tool" ]; then
+          "$menu_tool" --title 'PaSTA / What setup installs' --msgbox "$details" 14 68 >&2
+        else
+          printf '\n%s\n\n' "$details" >&3
+        fi
         ;;
       ''|4)
         if notify_worker --data-urlencode 'account_action=canceled'; then
