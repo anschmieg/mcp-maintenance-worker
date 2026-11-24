@@ -15,6 +15,34 @@ as_admin() {
   fi
 }
 
+root_owned_ssh_path() {
+  as_admin test ! -L "$1" || return 1
+  case "$(as_admin stat -c '%u:%a' -- "$1")" in
+    0:?[0145][0145]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+select_key_file() {
+  match="user=$account,laddr=$target_address,lport=22"
+  if [ -n "$probe_address" ]; then match="$match,addr=$probe_address,host=$probe_address"; fi
+  sshd_settings=$(as_admin /usr/sbin/sshd -T -C "$match") || return 1
+  key_paths=$(printf '%s\n' "$sshd_settings" | awk '$1 == "authorizedkeysfile" { $1=""; print; exit }')
+  managed_key_file=''
+  case " $key_paths " in
+    *' .ssh/authorized_keys '*|*' %h/.ssh/authorized_keys '*) return 0 ;;
+    *' /etc/ssh/authorized_keys/%u '*|*" /etc/ssh/authorized_keys/$account "*) ;;
+    *) note 'OpenSSH uses an unsupported AuthorizedKeysFile for this account.'; return 1 ;;
+  esac
+  managed_key_dir=/etc/ssh/authorized_keys
+  managed_key_file="$managed_key_dir/$account"
+  as_admin test -d "$managed_key_dir" && root_owned_ssh_path "$managed_key_dir" || return 1
+  if ! as_admin test -e "$managed_key_file" && as_admin test ! -L "$managed_key_file"; then
+    as_admin install -m 0644 /dev/null "$managed_key_file" || return 1
+  fi
+  as_admin test -f "$managed_key_file" && root_owned_ssh_path "$managed_key_file"
+}
+
 # Dialog tools return a tag. Gum and fzf return the displayed label.
 terminal_menu() {
   menu_prompt=$1
@@ -279,6 +307,10 @@ This key only allows the pairing check and fixed service restart."
       return 1
     fi
   fi
+  if ! select_key_file; then
+    note 'Could not select a safe key file from the account’s OpenSSH configuration.'
+    return 1
+  fi
   if [ -n "${approval_gate:-}" ]; then
     gate_dir="/var/lib/pasta-approval/$account"
     if ! as_admin test -x /usr/bin/python3 || ! as_admin test -x /usr/bin/openssl ||
@@ -302,10 +334,14 @@ This key only allows the pairing check and fixed service restart."
     fi
   fi
   note 'Installing the restricted SSH key…'
-  if ! as_admin runuser -u "$account" -- /bin/sh -c "$install_command" pasta-install "$account"; then
+  if [ -n "$managed_key_file" ]; then
+    as_admin /bin/sh -c "$install_command" pasta-install "$account" "$managed_key_file"
+  else
+    as_admin runuser -u "$account" -- /bin/sh -c "$install_command" pasta-install "$account"
+  fi || {
     note 'Could not install the SSH key. Check the error above, then rerun the command.'
     return 1
-  fi
+  }
   if ! notify_worker --data-urlencode "fingerprint=$fingerprint" --data-urlencode "account_action=$account_action" --data-urlencode "account=$account"; then
     note 'The setup page did not confirm receipt. Check the page before trying again.'
     return 1

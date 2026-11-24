@@ -432,6 +432,7 @@ await installApprovalFixture(detectedInstaller);
 assert.match(detectedInstaller, /target_address='100\.64\.0\.4'/u);
 assert.match(detectedInstaller, /target_name='Auto host'/u);
 assert.match(detectedInstaller, /Use an existing login account/u);
+assert.match(detectedInstaller, /sshd -T -C/u);
 execFileSync('/bin/sh', ['-n', '-c', detectedInstaller]);
 assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json(),
   { state: 'waiting_for_confirmation', host: 'Auto host' });
@@ -467,6 +468,25 @@ assert.ok((await call('maintenance_hosts')).hosts.some(host => host.address === 
 const secondAuto = await (await post('begin-host-pairing', { token: setupToken })).json();
 assert.notEqual(secondAuto.id, detectedPair.id);
 assert.equal((await claimHost(detectedAddress, secondAuto)).status, 409);
+assert.deepEqual(await (await post('cancel-pairing', { token: setupToken, id: detectedPair.id })).json(),
+  { state: 'already_paired' });
+const recoveryAddress = '100.64.0.5';
+assert.equal((await claimHost(recoveryAddress, secondAuto)).status, 200);
+await fetch(fixture + '/mode/wrong-pin', { method: 'POST' });
+assert.equal((await hostCallback(secondAuto.download.token, hostPin, secondAuto.id, 'created', 'pasta-mcp')).status, 200);
+let failed;
+for (let attempt = 0; attempt < 60; attempt++) {
+  failed = await (await post('finish-host-pairing', { token: setupToken, id: secondAuto.id })).json();
+  if (failed.state !== 'verifying') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.deepEqual(failed, { state: 'verification_failed', failure: 'host_key_unverified' });
+assert.deepEqual(await (await post('cancel-pairing', { token: setupToken, id: secondAuto.id })).json(),
+  { state: 'invalidated' });
+assert.equal((await downloadPairingScript(secondAuto)).status, 403);
+await fetch(fixture + '/mode/normal', { method: 'POST' });
+const replacement = await (await post('begin-host-pairing', { token: setupToken })).json();
+assert.equal((await claimHost(recoveryAddress, replacement)).status, 200);
 console.log('PASS: passkey resume, host detection, rejection of invisible devices, verification retry, and repeat pairing');
 
 const existingRestart = randomUUID();

@@ -51,7 +51,7 @@ type Job = {
 };
 type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
-type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
+type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; probeAddress?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
 const reviewRetention = 24 * 60 * 60_000;
 const retentionScanInterval = 60 * 60_000;
 const pairingLifetime = 15 * 60_000;
@@ -76,7 +76,7 @@ export type PasskeyEnv = {
     runHostEnrollmentCheck(expected: Host): Promise<HostResult>;
     runApprovedCommand(expected: Host, command: string): Promise<HostResult>;
     restartDemoService(expected: Host): Promise<HostResult>;
-    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
+    prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; probeAddress?: string; loginUrl?: string; needsDeviceApproval?: boolean }>;
     startDeviceLogin(): Promise<boolean>;
     removeEnrollmentHost(expected: Host): Promise<boolean>;
     prepareHostKey(address: string, account: HostAccount, commandExecution?: boolean): Promise<string | null>;
@@ -347,7 +347,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         await tx.delete('pairing:' + previousId);
       }
       await tx.put(addressSlot, id);
-      await tx.put(slot, { ...current, address, addressName: peer.name });
+      await tx.put(slot, { ...current, address, addressName: peer.name, probeAddress: probe.probeAddress });
       return true;
     });
     if (!claimed) return { error: 'This device is already paired or the command was claimed by another host.', status: 409 };
@@ -379,7 +379,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       if (previous?.fingerprint) return previous;
       const id = await this.#unusedPairingId(tx);
       if (previousId) await tx.delete('pairing:' + previousId);
-      const next = { id, address, commandExecution: true, signedApproval: true, account: maintenanceAccount, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
+      const next = { id, address, probeAddress: probe.probeAddress, commandExecution: true, signedApproval: true, account: maintenanceAccount, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
       await tx.put('pairing:' + id, next);
       await tx.put(slot, id);
       return next;
@@ -422,6 +422,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return [
       '#!/bin/sh',
       'target_address=' + shellQuote(pair.address),
+      'probe_address=' + shellQuote(validTailnetIpv4(pair.probeAddress) ? pair.probeAddress! : ''),
       'target_name=' + shellQuote((pair.addressName ?? pair.address).replace(/[\x00-\x1f\x7f]/gu, '').slice(0, 160)),
       'account=' + shellQuote(account),
       'command_execution=' + (pair.commandExecution ? 'yes' : 'no'),
@@ -439,16 +440,37 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async cancelPairing(token: unknown, id: unknown) {
     if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof id !== 'string' || !validPairingId(id)) return null;
-    return this.ctx.storage.transaction(async tx => {
-      const slot = 'pairing:' + id;
+    const slot = 'pairing:' + id;
+    const pending = await this.ctx.storage.transaction(async tx => {
       const pair = await tx.get<Pairing>(slot);
-      if (!pair) return { state: 'invalidated' };
-      if (pair.fingerprint) return { state: 'already_paired' };
+      if (!pair || pair.fingerprint) return pair;
       const addressSlot = 'pairing-address:' + pair.address;
       if (await tx.get<string>(addressSlot) === id) await tx.delete(addressSlot);
+      await tx.delete('host-approval-key:' + id);
       await tx.delete(slot);
-      return { state: 'invalidated' };
+      return undefined;
     });
+    if (!pending?.fingerprint) return { state: 'invalidated' };
+    if (!pending.automatic || pending.check?.state === 'verified') return { state: 'already_paired' };
+    const address = pending.address;
+    if (!pending.check || this.#changingHosts.has(address)) return { state: 'verification_pending' };
+    this.#changingHosts.add(address);
+    try {
+      const host: Host = { address, fingerprint: pending.fingerprint, account: pending.account, enrollmentId: id,
+        commandExecution: pending.commandExecution, signedApproval: pending.signedApproval };
+      if (await this.ctx.storage.get('onboarding-host:' + address)) return { state: 'already_paired' };
+      const removed = await this.env.HOST_PROBE?.removeEnrollmentHost(host).catch(() => false);
+      if (!removed) return { state: 'removal_pending' };
+      await this.ctx.storage.transaction(async tx => {
+        const addressSlot = 'pairing-address:' + address;
+        if (await tx.get<string>(addressSlot) === id) await tx.delete(addressSlot);
+        await tx.delete('host-approval-key:' + id);
+        await tx.delete(slot);
+      });
+      return { state: 'invalidated' };
+    } finally {
+      this.#changingHosts.delete(address);
+    }
   }
 
   async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown, accountAction: unknown, selectedAccount: unknown) {
@@ -526,6 +548,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async #verifyAutomaticPairing(pair: Pairing, slot: string) {
     if (!pair.fingerprint || !this.env.HOST_PROBE) return { state: 'verification_failed', failure: 'unconfigured' };
+    if (!await this.ctx.storage.get(slot)) return { state: 'pairing_canceled' };
     const host: Host = { address: pair.address, fingerprint: pair.fingerprint, account: pair.account, enrollmentId: pair.id, commandExecution: pair.commandExecution, signedApproval: pair.signedApproval };
     let check: HostResult = { state: 'check_outcome_unknown', executed: null };
     try {

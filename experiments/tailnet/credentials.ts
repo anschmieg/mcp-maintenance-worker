@@ -98,10 +98,21 @@ export function hostInstallCommand(publicKey: string, account: HostAccount = mai
   const escaped = commandGate(commandExecution).replace(/["\\]/gu, '\\$&');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
-    'test "$(id -un)" = "${1:-' + account + '}" && umask 077 && mkdir -p "$HOME/.ssh" &&',
-    '  chmod 700 "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" &&',
-    "  key='" + line + "' &&",
-    '  (grep -qxF -- "$key" "$HOME/.ssh/authorized_keys" || printf "\\n%s\\n" "$key" >> "$HOME/.ssh/authorized_keys")',
+    'set -eu',
+    'if [ -n "${2:-}" ]; then',
+    '  test "$(id -u)" = 0 && test "$2" = "/etc/ssh/authorized_keys/$1" || exit 1',
+    '  key_file=$2',
+    'else',
+    '  test "$(id -un)" = "${1:-' + account + '}" || exit 1',
+    '  umask 077',
+    '  mkdir -p "$HOME/.ssh"',
+    '  chmod 700 "$HOME/.ssh"',
+    '  key_file="$HOME/.ssh/authorized_keys"',
+    '  touch "$key_file"',
+    '  chmod 600 "$key_file"',
+    'fi',
+    "key='" + line + "'",
+    'grep -qxF -- "$key" "$key_file" || printf "\\n%s\\n" "$key" >> "$key_file"',
   ].join('\n');
 }
 

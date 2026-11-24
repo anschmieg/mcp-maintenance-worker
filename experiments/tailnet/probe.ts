@@ -157,11 +157,13 @@ export class ProbeNode extends TailnetObject {
 
     const ready = interactive ? tailnet : await this.#readyTailnet().catch(() => null);
     const connected = Boolean(ready);
-    const peers = visibleDevices(ready?.status().visibleDevices);
+    const running = ready?.status();
+    const peers = visibleDevices(running?.visibleDevices);
+    const probeAddress = Array.isArray(running?.addrs) ? running.addrs.find(validTailnetIpv4) : undefined;
     await this.ctx.storage.delete('setup-inventory');
     return {
       state: connected ? 'connected' : 'tailnet_pending', deviceTag,
-      devices: peers,
+      devices: peers, probeAddress,
     };
   }
 
