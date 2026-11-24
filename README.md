@@ -51,6 +51,7 @@ For a fresh Cloudflare deployment, set `PASTA_WORKERS_SUBDOMAIN` to your account
 Use this repository as the source for changes. Keep live endpoints, host targets, fingerprints, and credentials in the runtime configuration of the component that consumes them.
 
 - **Worker** — store `MCP_BEARER_TOKEN` as a Cloudflare Worker secret. Cloudflare CLI authentication belongs in the operator's local credential store.
+- **OpenBot remote MCP** — use the production URL ending in `/mcp` as an HTTP server with no custom authorization header. When OpenBot asks you to sign in, use the owner passkey you registered during setup. PaSTA supports OAuth authorization code with S256 PKCE and accepts OpenBot's loopback callbacks. `OAUTH_REDIRECT_URI` also allows one exact HTTPS callback. The OAuth access token lasts 15 minutes. OpenBot can renew it for up to seven days from sign-in, after which the owner signs in again. SSH command approval still requires a separate passkey confirmation.
 - **OpenBot stdio adapter** — provide `MCP_WORKER_URL` and `MCP_BEARER_TOKEN` at startup. Node 22 can load them from an owner-readable file outside the checkout. Run the following from `worker/` after installing its locked dependencies.
 
   ```sh

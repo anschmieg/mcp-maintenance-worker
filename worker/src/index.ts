@@ -4,10 +4,12 @@ import { z } from 'zod';
 import { classify } from './classify';
 import { assessCommand } from './assessment';
 import { TimingProbe } from './timing';
-import { approvalStore, passkeyOrigin, passkeyRoute, type PasskeyEnv } from './passkeys';
+import { approvalStore, passkeyOrigin, passkeyRoute } from './passkeys';
+import { acceptsOAuth, oauthRoute, oauthUnauthorized, type OAuthEnv } from './oauth';
+export { OAuthGrant } from './oauth';
 export { TimingProbe };
 export { PasskeyApproval } from './passkeys';
-type Env = PasskeyEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
+type Env = OAuthEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
 
 export class MaintenanceAgent extends McpAgent<Env> {
   server = new McpServer({name:'pasta',version:'0.6.0'});
@@ -94,14 +96,22 @@ export default {
       if (env.PASSKEY_SETUP_TOKEN && env.PASSKEY_SETUP_TOKEN === token) return new Response(null, { status: 503 });
       return passkeyRoute(request, env);
     }
+    const oauth = await oauthRoute(request, env);
+    if (oauth) return oauth;
     if (!token || token.length<32) return new Response('PoC token not configured',{status:503});
     const auth=request.headers.get('Authorization');
-    if (!auth || !auth.startsWith('Bearer ') || auth.length!==token.length+7) return new Response('Unauthorized',{status:401});
-    const enc=new TextEncoder();
-    const key=await crypto.subtle.importKey('raw',enc.encode(token),{name:'HMAC',hash:'SHA-256'},false,['sign','verify']);
-    const challenge=enc.encode('maintenance-poc-access-v1');
-    const clientKey=await crypto.subtle.importKey('raw',enc.encode(auth.slice(7)),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-    if (!await crypto.subtle.verify('HMAC',key,await crypto.subtle.sign('HMAC',clientKey,challenge),challenge)) return new Response('Unauthorized',{status:401});
+    if (!auth?.startsWith('Bearer ')) return oauthUnauthorized(env);
+    const bearer = auth.slice(7);
+    const oauthToken = path === '/mcp' && new URL(request.url).origin === passkeyOrigin(env)?.origin &&
+      await acceptsOAuth(env, bearer);
+    if (!oauthToken) {
+      if (bearer.length !== token.length) return oauthUnauthorized(env);
+      const enc=new TextEncoder();
+      const key=await crypto.subtle.importKey('raw',enc.encode(token),{name:'HMAC',hash:'SHA-256'},false,['sign','verify']);
+      const challenge=enc.encode('maintenance-poc-access-v1');
+      const clientKey=await crypto.subtle.importKey('raw',enc.encode(bearer),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+      if (!await crypto.subtle.verify('HMAC',key,await crypto.subtle.sign('HMAC',clientKey,challenge),challenge)) return oauthUnauthorized(env);
+    }
     if (request.headers.has('Origin')) return new Response('Browser origin not allowed',{status:403});
     const length=request.headers.get('Content-Length');
     if (request.body && (!length || !/^\d{1,10}$/.test(length) || Number(length)>32768)) return new Response('A bounded request body is required',{status:413});

@@ -21,11 +21,11 @@ async function post(path, body, requestOrigin = origin) {
   });
 }
 
-async function call(name, job_id, host, command, statement) {
+async function call(name, job_id, host, command, statement, statementToken) {
   const client = new Client({ name: 'passkey-integration-test', version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
-      requestInit: { headers: { Authorization: 'Bearer ' + mcpToken } },
+      requestInit: { headers: { Authorization: 'Bearer ' + (statementToken ?? mcpToken) } },
     }), { timeout: 8000 });
     const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}), ...(command === undefined ? {} : { command, statement }) } });
     assert.ok(!result.isError, JSON.stringify(result));
@@ -129,6 +129,69 @@ setupToken = (await sessionResponse.json()).token;
 assert.notEqual(setupToken, firstSession);
 assert.equal((await post('prepare-host', { token: firstSession })).status, 403);
 assert.equal((await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion })).status, 403);
+
+const webAuthnLibrary = await (await fetch(origin + '/passkeys/webauthn.js')).text();
+assert.match(webAuthnLibrary, /startAuthentication/u);
+assert.doesNotMatch(webAuthnLibrary, /const title = document/u);
+const redirectUri = 'http://127.0.0.1:28417/mcp-auth';
+const resource = origin + '/mcp';
+const oauthPost = (route, body, headers = {}) => fetch(origin + '/oauth/' + route, {
+  method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+});
+const issuer = await (await fetch(origin + '/.well-known/oauth-authorization-server')).json();
+assert.equal(issuer.issuer, origin);
+assert.deepEqual(issuer.code_challenge_methods_supported, ['S256']);
+assert.equal((await (await fetch(origin + '/.well-known/oauth-protected-resource/mcp')).json()).resource, resource);
+const unauthorized = await fetch(resource);
+assert.equal(unauthorized.status, 401);
+assert.match(unauthorized.headers.get('WWW-Authenticate'), /resource_metadata=/u);
+assert.equal((await oauthPost('register', { redirect_uris: ['https://different.example/callback'] })).status, 400);
+const clientRegistration = await oauthPost('register', { redirect_uris: [redirectUri], token_endpoint_auth_method: 'none' });
+assert.equal(clientRegistration.status, 201);
+const { client_id } = await clientRegistration.json();
+const verifier = b64(randomBytes(32));
+const params = new URLSearchParams({
+  client_id, redirect_uri: redirectUri, response_type: 'code', code_challenge_method: 'S256',
+  code_challenge: b64(hash(verifier)), state: 'integration-test-state', resource,
+});
+const authorize = await fetch(issuer.authorization_endpoint + '?' + params);
+assert.equal(authorize.status, 200);
+const transaction = (await authorize.text()).match(/request: '([A-Za-z0-9_-]{43})'/u)?.[1];
+assert.ok(transaction);
+const browserHeaders = { Origin: origin };
+const foreignChallenge = await (await post('sign-in-options', {})).json();
+assert.equal((await oauthPost('approve', {
+  request: transaction, id: foreignChallenge.id, response: assertion(0x05, origin, foreignChallenge.options.challenge),
+}, browserHeaders)).status, 403);
+const challengeResponse = await oauthPost('options', { request: transaction }, browserHeaders);
+assert.equal(challengeResponse.status, 200);
+const oauthChallenge = await challengeResponse.json();
+const approval = { request: transaction, id: oauthChallenge.id, response: assertion(0x05, origin, oauthChallenge.options.challenge) };
+assert.equal((await oauthPost('approve', approval, { Origin: 'https://different.example' })).status, 400);
+const positiveApproval = await oauthPost('approve', approval, browserHeaders);
+assert.equal(positiveApproval.status, 200);
+const callback = new URL((await positiveApproval.json()).redirect);
+assert.equal(callback.origin + callback.pathname, redirectUri);
+assert.equal(callback.searchParams.get('state'), params.get('state'));
+assert.equal(callback.searchParams.get('iss'), origin);
+assert.deepEqual(await (await cookieRequest('review-session', {})).json(), { signedIn: true });
+const tokenRequest = body => fetch(issuer.token_endpoint, { method: 'POST', body: new URLSearchParams({ client_id, resource, ...body }) });
+const codeGrant = { grant_type: 'authorization_code', code: callback.searchParams.get('code'), redirect_uri: redirectUri, code_verifier: verifier };
+assert.equal((await tokenRequest({ ...codeGrant, code_verifier: b64(randomBytes(32)) })).status, 400);
+assert.equal((await tokenRequest({ ...codeGrant, resource: origin + '/wrong' })).status, 400);
+const exchanges = await Promise.all([tokenRequest(codeGrant), tokenRequest(codeGrant)]);
+assert.deepEqual(exchanges.map(result => result.status).sort(), [200, 400]);
+const { access_token, refresh_token } = await exchanges.find(result => result.ok).json();
+const oauthJob = randomUUID();
+assert.equal((await call('start_passkey_test', oauthJob, undefined, undefined, undefined, access_token)).executed, false);
+assert.equal((await cookieRequest('approve', { job: oauthJob, token: access_token })).status, 403);
+const refresh = { grant_type: 'refresh_token', refresh_token };
+const renewed = await tokenRequest(refresh);
+assert.equal(renewed.status, 200);
+assert.equal((await tokenRequest(refresh)).status, 400);
+assert.equal((await fetch(resource, { headers: { Authorization: 'Bearer ' + access_token } })).status, 401);
+assert.equal((await call('passkey_test_status', oauthJob, undefined, undefined, undefined, (await renewed.json()).access_token)).executed, false);
+console.log('PASS: OAuth discovery, owner passkey, PKCE, single-use exchange, refresh, and MCP authorization');
 
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
 assert.deepEqual(await (await post('prepare-host', { token: setupToken })).json(), { state: 'unconfigured' });
