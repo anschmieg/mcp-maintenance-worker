@@ -214,10 +214,31 @@ export async function oauthRoute(request: Request, env: OAuthEnv) {
 }
 
 function consentPage(nonce: string, id: string) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Connect OpenBot to PaSTA</title><main><h1>Connect OpenBot to PaSTA</h1>
-<p>OpenBot can view enrolled hosts and request maintenance. Each command still requires your passkey approval.</p>
-<button type="button">Connect with passkey</button><p role="status"></p></main>
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect OpenBot to PaSTA</title>
+<link rel="stylesheet" href="/passkeys/style.css">
+</head>
+<body>
+<div class="shell">
+<header class="brand">
+  <span class="brand-mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m12 3 7 3v5c0 4-2.5 7.5-7 10-4.5-2.5-7-6-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>
+    </svg>
+  </span>
+  <span>PaSTA</span>
+</header>
+<main class="card">
+  <h1>Connect OpenBot to PaSTA</h1>
+  <p class="lead">OpenBot can view enrolled hosts and request maintenance. Each command still requires your passkey approval.</p>
+  <div class="actions"><button type="button">Connect with passkey</button></div>
+  <p class="status" data-tone="error" role="status"></p>
+</main>
+</div>
 <script nonce="${nonce}" src="/passkeys/webauthn.js"></script><script nonce="${nonce}">
 const button = document.querySelector('button');
 const status = document.querySelector('[role=status]');
@@ -238,5 +259,7 @@ button.onclick = async () => {
     button.disabled = false;
   }
 };
-</script></html>`;
+</script>
+</body>
+</html>`;
 }
