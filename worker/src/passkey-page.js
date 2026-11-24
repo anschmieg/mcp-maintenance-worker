@@ -529,6 +529,9 @@ if (location.pathname.endsWith('/onboard')) {
       ({ token } = await post('sign-in', { id, response }));
       await loadReview();
     }, 'Sign-in did not complete. Try again.');
+    void post('review-session', {}).then(({ signedIn }) => {
+      if (signedIn) return loadReview();
+    }).catch(() => {});
   } else {
     showResult({ state: 'unknown' });
   }

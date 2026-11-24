@@ -113,6 +113,17 @@ assert.notEqual(ownerSignIn.id, laterSignIn.id);
 const ownerAssertion = assertion(0x05, origin, ownerSignIn.options.challenge);
 assert.equal((await post('sign-in', { id: ownerSignIn.id, response: assertion(0x01, origin, ownerSignIn.options.challenge) })).status, 403);
 const sessionResponse = await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion });
+const ownerCookie = sessionResponse.headers.get('Set-Cookie');
+assert.match(ownerCookie, /^__Host-pasta-owner=[0-9a-f-]{72}; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800$/u);
+const cookieRequest = (route, body) => fetch(origin + '/passkeys/' + route, {
+  method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: ownerCookie.split(';')[0] },
+  body: JSON.stringify(body),
+});
+assert.deepEqual(await (await cookieRequest('review-session', {})).json(), { signedIn: true });
+assert.deepEqual(await (await post('review-session', {})).json(), { signedIn: false });
+assert.equal((await cookieRequest('job-status', { job })).status, 200);
+assert.equal((await cookieRequest('approve', { job })).status, 409);
+
 assert.equal(sessionResponse.status, 200);
 setupToken = (await sessionResponse.json()).token;
 assert.notEqual(setupToken, firstSession);
