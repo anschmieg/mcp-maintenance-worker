@@ -688,10 +688,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       return true;
     });
     if (!matches) return { state: 'job_id_in_use', ...empty };
-    const status = await this.status(jobId);
-    return status.state === 'pending'
-      ? { ...status, review_url: new URL(prefix + '/review?job=' + jobId, origin).href }
-      : status;
+    return this.status(jobId);
   }
 
   async #scheduleRetention() {
@@ -737,6 +734,8 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       (job.execution_owner !== this.#executionOwner || Date.now() >= job.approved_at + lifetime)
       ? 'check_outcome_unknown' : 'checking_host';
     const approvedState = job.target.dry_run ? 'verified_dry_run' : job.host_result?.state ?? job.host_verification ?? checkingState;
+    const state = job.approved_at ? approvedState : job.expires_at <= Date.now() ? 'expired' : 'pending';
+    const origin = passkeyOrigin(this.env);
     const { host, operation, execution_identity, dry_run } = job.target;
     const hostResult = job.host_result;
     const retained = job.expires_at + reviewRetention > Date.now();
@@ -758,7 +757,10 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       executed: job.host_result ? job.host_result.executed : (
         job.approved_at && !job.target.dry_run ? null : false
       ),
-      state: job.approved_at ? approvedState : job.expires_at <= Date.now() ? 'expired' : 'pending',
+      state,
+      ...(state === 'pending' && origin ? {
+        review_url: new URL(prefix + '/review?job=' + encodeURIComponent(jobId), origin).href,
+      } : {}),
       approved_at: job.approved_at ?? null,
       can_reconcile: Boolean(job.retry_lock && !job.reconciled_at && (hostResult ?
         hostResult.executed === null : job.approved_at && Date.now() >= job.approved_at + lifetime)),

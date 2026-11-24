@@ -127,10 +127,19 @@ code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
   .status[data-tone="pending"] { color: #bed3ff; background: #252f4d; }
 }
 
-#command-display { text-align: center; padding: 1rem 0 1.2rem; border-bottom: 2px solid var(--line); }
+#command-display { text-align: left; padding: 1rem 0 1.2rem; border-bottom: 2px solid var(--line); }
 #command-display h2 { color: var(--muted); font-size: .875rem; margin: 0 0 .45rem; }
 #command-display svg { vertical-align: -.23rem; margin-right: .2rem; }
-#command-display code { font-size: clamp(1rem, 3.5vw, 1.2rem); line-height: 1.5; }
+#command-display pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#command-display code { font-size: .875rem; line-height: 1.55; }
+#command-display .shell-string { color: #28604e; }
+#command-display .shell-argument { color: #4f4a86; }
+#command-display .shell-operator { color: #625066; }
+@media (prefers-color-scheme: dark) {
+  #command-display .shell-string { color: #95cfb8; }
+  #command-display .shell-argument { color: #b9aff1; }
+  #command-display .shell-operator { color: #cbb7cf; }
+}
 #review-command [data-review="run-as"]:not([hidden]) { display: block; margin-top: .25rem; color: var(--muted); }
 #review-command { width: 100%; border-collapse: collapse; font-size: .9rem; margin: 0 0 1rem; }
 #review-command tr { border-bottom: 1px solid var(--line); }

@@ -6,6 +6,30 @@ const action = document.querySelector('#action');
 const status = document.querySelector('#status');
 const steps = document.querySelector('#steps');
 
+// Highlight a few common shell tokens while keeping the review text verbatim.
+function renderCommand(code, command) {
+  const tokens = /\\.|\x27[^\x27]*\x27|"(?:\\.|[^"\\])*"|(?<!\S)--?[a-zA-Z][\w-]*|\$(?:[a-zA-Z_]\w*|[0-9?#!@$*-])|[|&;<>]/gu;
+  const fragment = document.createDocumentFragment();
+  let offset = 0;
+  for (const match of command.matchAll(tokens)) {
+    const token = match[0];
+    fragment.append(command.slice(offset, match.index));
+    if (token.startsWith('\\')) {
+      fragment.append(token);
+    } else {
+      const span = document.createElement('span');
+      span.className = token.startsWith("'") || token.startsWith('"') ? 'shell-string'
+        : token.startsWith('-') || token.startsWith('$') ? 'shell-argument'
+          : 'shell-operator';
+      span.textContent = token;
+      fragment.append(span);
+    }
+    offset = match.index + token.length;
+  }
+  fragment.append(command.slice(offset));
+  code.replaceChildren(fragment);
+}
+
 function showStep(name) {
   steps.hidden = false;
   for (const step of steps.querySelectorAll('[data-step]')) {
@@ -409,7 +433,7 @@ if (location.pathname.endsWith('/onboard')) {
     details.textContent = '';
     details.hidden = true;
     const commandDisplay = document.querySelector('#command-display');
-    commandDisplay.querySelector('code').textContent = request.command;
+    renderCommand(commandDisplay.querySelector('code'), request.command);
     commandDisplay.hidden = false;
 
     const hostname = request.host_name?.replace(/\.[^.]+\.ts\.net\.?$/iu, '');

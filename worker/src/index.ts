@@ -11,37 +11,46 @@ export { TimingProbe };
 export { PasskeyApproval } from './passkeys';
 type Env = OAuthEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
 
+const approvalInstructions = 'When a PaSTA tool returns review_url, immediately give the user that exact URL as a clickable approval link in chat. Wait for the owner to approve, then use passkey_test_status with the original job_id to check the result. A pending request has not run.';
+
 export class MaintenanceAgent extends McpAgent<Env> {
-  server = new McpServer({name:'pasta',version:'0.6.0'});
+  server = new McpServer({name:'pasta',version:'0.6.0'}, { instructions: approvalInstructions });
   async init() {
     const probe_id=z.string().uuid();
     const output=(probe:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(probe)}],structuredContent:{probe,executed:false}});
     if (passkeyOrigin(this.env)) {
       const jobSchema = { job_id: z.string().uuid().toLowerCase() };
       const result = (job: Record<string, unknown>) => ({
-        content: [{ type: 'text' as const, text: JSON.stringify(job) }], structuredContent: job,
+        content: [
+          { type: 'text' as const, text: JSON.stringify(job) },
+          ...(typeof job.review_url === 'string' ? [{
+            type: 'text' as const,
+            text: 'Send this link to the user now: [Approve in PaSTA](' + job.review_url + '). Wait for the owner to approve before checking the job result.',
+          }] : []),
+        ],
+        structuredContent: job,
       });
       this.server.registerTool('start_passkey_test', {
-        description: 'Create a dry-run approval for a fixed enrollment diagnostic. Show the owner the review URL. No host action runs.',
+        description: 'Create a dry-run approval for a fixed enrollment diagnostic. No host action runs. ' + approvalInstructions,
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id)));
       this.server.registerTool('passkey_test_status', {
-        description: 'Read the approval and execution result by its original job UUID.',
+        description: 'Read the approval and execution result by its original job UUID. ' + approvalInstructions,
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
       this.server.registerTool('start_host_enrollment', {
-        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. Show the owner the review URL.',
+        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. ' + approvalInstructions,
         inputSchema: { ...jobSchema, host: z.string().optional() },
       }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
       this.server.registerTool('request_maintenance_command', {
-        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. Show the returned review URL to the owner.',
+        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. ' + approvalInstructions,
         inputSchema: z.strictObject({ ...jobSchema, host: z.string(), command: z.string().max(4096),
           statement: z.string().trim().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
         }),
       }, async ({ job_id, host, command, statement }) =>
         result(await approvalStore(this.env).requestCommand(job_id, host, command, statement)));
       this.server.registerTool('request_service_restart', {
-        description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. Show the owner the review URL.',
+        description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. ' + approvalInstructions,
         inputSchema: z.strictObject({ ...jobSchema, host: z.string() }),
       }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host, true)));
       this.server.registerTool('maintenance_host_status', {

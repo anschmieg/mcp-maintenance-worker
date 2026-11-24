@@ -30,6 +30,13 @@ async function call(name, job_id, host, command, statement, statementToken) {
     const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}), ...(command === undefined ? {} : { command, statement }) } });
     assert.ok(!result.isError, JSON.stringify(result));
     assert.ok([false, true, null].includes(result.structuredContent.executed));
+    const { review_url: reviewUrl } = result.structuredContent;
+    if (reviewUrl) {
+      assert.equal(result.structuredContent.state, 'pending');
+      assert.ok(result.content.some(item => item.type === 'text' && item.text.includes('[Approve in PaSTA](' + reviewUrl + ')')));
+    } else {
+      assert.equal(result.content.length, 1);
+    }
     return result.structuredContent;
   } finally { await client.close(); }
 }
@@ -305,7 +312,7 @@ console.log('PASS: owner device picker and one-time host callback pin the select
 const pending = await call('start_passkey_test', job);
 assert.equal(pending.state, 'pending');
 assert.equal((await fetch(pending.review_url)).status, 200);
-assert.equal((await call('passkey_test_status', job)).state, 'pending');
+assert.deepEqual(await call('passkey_test_status', job), pending);
 const second = randomUUID();
 await call('start_passkey_test', second);
 const { options } = await (await post('review-options', { job })).json();
