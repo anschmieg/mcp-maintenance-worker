@@ -85,7 +85,7 @@ const fixedCommands =
   enrollmentCommand + ') echo ' + enrollmentMarker + ';; ' +
   restartCommand + ') /usr/bin/sudo -n -- /usr/bin/systemctl restart ' + restartUnit +
   ' && echo ' + restartMarker + ';; ';
-const dynamicCommand = commandPrefix.trimEnd() + '\\ *) ' +
+const dynamicCommand = '"' + commandPrefix + '"*) ' +
   'printf "%s" "${SSH_ORIGINAL_COMMAND#' + commandPrefix +
   '}" | /usr/bin/sudo -n -- /usr/bin/python3 -I /usr/local/libexec/pasta-approval.py;; ';
 const commandGate = (dynamic: boolean) => 'case "$SSH_ORIGINAL_COMMAND" in ' +
@@ -95,7 +95,7 @@ export const forcedCommand = commandGate(false);
 export function hostInstallCommand(publicKey: string, account: HostAccount = maintenanceAccount, commandExecution = false) {
   if (!/^ssh-ed25519 [A-Za-z0-9+/]{68}$/u.test(publicKey)) throw new Error('Invalid enrollment public key');
   if (!isHostAccount(account)) throw new Error('Invalid maintenance account');
-  const escaped = commandGate(commandExecution).replace(/["\\]/gu, '\\$&');
+  const escaped = commandGate(commandExecution).replaceAll('"', '\\"');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
     'set -eu',
