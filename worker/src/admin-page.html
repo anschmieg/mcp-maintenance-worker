@@ -68,7 +68,11 @@
           <fieldset><legend>SSH hosts</legend><div class="admin-checkboxes" id="standing-host"></div></fieldset>
           <div>
             <label>Action <select id="standing-command" required aria-describedby="standing-scope-hint"></select></label>
-            <p class="hint" id="standing-scope-hint">Read-only standing approvals cover PaSTA’s supported checks. Other commands require review.</p>
+            <p class="hint" id="standing-scope-hint">Denied requests take precedence over requests requiring approval, then standing approvals. Rules apply to new requests.</p>
+            <div id="standing-matcher" hidden>
+              <label>Command match <select id="standing-match-kind"><option value="exact">Exact text</option><option value="prefix">Starts with</option></select></label>
+              <label>Command text <textarea id="standing-match-text" rows="2" maxlength="4096"></textarea></label>
+            </div>
           </div>
         </div>
         <div class="admin-form-actions">

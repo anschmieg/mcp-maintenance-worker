@@ -24,10 +24,11 @@ const empty = { executed: false };
 const standingCommands = ['uptime', 'df -h /srv/techleaddocker'] as const;
 type StandingCommand = typeof standingCommands[number];
 type McpConnection = { id: string; name: string; reportedName?: string; callback: string; connectedAt: number; expires: number };
-type StandingScope = StandingCommand | 'read-only';
+type StandingScope = StandingCommand | 'read-only' | 'require-approval' | 'deny';
+type CommandMatch = { kind: 'exact' | 'prefix'; text: string };
 type RuleHost = { address: string; enrollment: string };
 type StandingRule = {
-  id: string; grants: string[]; targets: RuleHost[]; command: StandingScope; approvedCommands?: readonly StandingCommand[];
+  id: string; grants: string[]; targets: RuleHost[]; command: StandingScope; approvedCommands?: readonly StandingCommand[]; matcher?: CommandMatch;
 };
 type StoredRule = StandingRule | ({ id: string; grant: string; command: StandingCommand } & RuleHost);
 
@@ -719,14 +720,20 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
           existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId &&
           Boolean(existing.target.commandExecution) === Boolean(target.commandExecution) &&
           Boolean(existing.target.signedApproval) === Boolean(target.signedApproval)));
+      const applicable = command && grant && host?.enrollmentId
+        ? [...(await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values()].map(expandRule).filter(rule =>
+          rule.grants.includes(grant) && rule.targets.some(item => item.address === host.address && item.enrollment === host.enrollmentId))
+        : [];
+      const matchesCommand = ({ matcher }: StandingRule) => Boolean(matcher && command &&
+        (matcher.kind === 'exact' ? command === matcher.text : command.startsWith(matcher.text)));
+      if (applicable.some(rule => rule.command === 'deny' && matchesCommand(rule))) return 'denied';
       const job: Job = { target, options, ...(command ? { command, statement, hostName, scope } : {}),
         expires_at: Date.now() + this.#jobLifetime() };
-      if (canUseRule && host && !await tx.get('removing-host:' + host.address) &&
+      if (canUseRule && host && !applicable.some(rule => rule.command === 'require-approval' && matchesCommand(rule)) &&
+          !await tx.get('removing-host:' + host.address) &&
           sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host)) {
-        const rules = await tx.list<StoredRule>({ prefix: 'standing-rule:' });
-        const rule = [...rules.values()].map(expandRule).find(item =>
-          (item.command === command || item.approvedCommands?.some(approved => approved === command)) && item.grants.includes(grant) &&
-          item.targets.some(target => target.address === host.address && target.enrollment === host.enrollmentId));
+        const rule = applicable.find(item =>
+          item.command === command || item.approvedCommands?.some(approved => approved === command));
         const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, target.execution_identity, command]));
         if (rule && !await tx.get(retryLock)) {
           await tx.put(retryLock, key);
@@ -737,6 +744,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       await tx.put<Job>(key, job);
       return true;
     });
+    if (matches === 'denied') return { state: 'denied_by_policy', ...empty };
     if (!matches) return { state: 'job_id_in_use', ...empty };
     if (standingAccepted && host) this.ctx.waitUntil(this.#verifyHost(key, host, target.operation, command));
     return this.status(jobId);
@@ -886,23 +894,31 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const clients = [...connections.values()].sort((a, b) => b.connectedAt - a.connectedAt)
       .map(connection => ({ ...connection, active: connection.expires > now }));
     return {
-      clients, hosts, commands: ['read-only', ...standingCommands],
+      clients, hosts, commands: ['require-approval', 'deny', 'read-only', ...standingCommands],
       sharedBearerConfigured: (this.env.MCP_BEARER_TOKEN?.length ?? 0) >= 32,
-      rules: [...rules.values()].map(expandRule).map(({ id, grants, targets, command, approvedCommands }) => {
+      rules: [...rules.values()].map(expandRule).map(({ id, grants, targets, command, approvedCommands, matcher }) => {
         const clientIds = grants.filter(grant => (connections.get('mcp-connection:' + grant)?.expires ?? 0) > now);
         const hostAddresses = targets.filter(({ address, enrollment }) =>
           eligibleHosts.has(address) && byAddress.get(address)?.enrollmentId === enrollment).map(host => host.address);
         return {
-          id, grants, addresses: targets.map(host => host.address), command, approvedCommands, clientIds, hostAddresses,
+          id, grants, addresses: targets.map(host => host.address), command, approvedCommands, matcher, clientIds, hostAddresses,
           available: clientIds.length > 0 && hostAddresses.length > 0,
         };
       }),
     };
   }
 
-  async saveStandingRule(token: unknown, grant: unknown, address: unknown, command: unknown, id?: unknown) {
-    if (!await this.#ownerAuthorized(token) || (command !== 'read-only' && !standingCommand(command)) ||
+  async saveStandingRule(token: unknown, grant: unknown, address: unknown, command: unknown, id?: unknown, input?: unknown) {
+    const restrictive = command === 'deny' || command === 'require-approval';
+    if (!await this.#ownerAuthorized(token) || (!restrictive && command !== 'read-only' && !standingCommand(command)) ||
         (id !== undefined && (typeof id !== 'string' || !uuid.test(id)))) return false;
+    let matcher: CommandMatch | undefined;
+    if (restrictive) {
+      const value = input as Partial<CommandMatch> | null | undefined;
+      if ((value?.kind !== 'exact' && value?.kind !== 'prefix') ||
+          typeof value.text !== 'string' || !value.text.trim() || new TextEncoder().encode(value.text).length > 4096) return false;
+      matcher = { kind: value.kind, text: value.text };
+    }
     const grants = selection(grant, item => validGrant.test(item));
     const addresses = selection(address, validTailnetIpv4);
     if (!grants || !addresses) return false;
@@ -924,13 +940,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         targets.push({ address: hostAddress, enrollment: host.enrollmentId });
       }
       if (id === undefined ? existing.size >= 64 : !existing.has('standing-rule:' + ruleId)) return false;
-      const duplicate = [...existing.values()].map(expandRule).some(rule => rule.id !== ruleId && rule.command === command &&
+      const duplicate = [...existing.values()].map(expandRule).some(rule => rule.id !== ruleId && rule.command === command && rule.matcher?.kind === matcher?.kind && rule.matcher?.text === matcher?.text &&
         rule.grants.length === grants.length && grants.every(item => rule.grants.includes(item)) &&
         rule.targets.length === targets.length && targets.every(target => rule.targets.some(item =>
           item.address === target.address && item.enrollment === target.enrollment)));
       if (duplicate) return id === undefined;
       await tx.put<StandingRule>('standing-rule:' + ruleId, {
-        id: ruleId, grants, targets, command, ...(command === 'read-only' ? { approvedCommands: standingCommands } : {}),
+        id: ruleId, grants, targets, command, ...(matcher ? { matcher } : {}), ...(command === 'read-only' ? { approvedCommands: standingCommands } : {}),
       });
       return true;
     });
@@ -1152,7 +1168,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return rules ? reply(rules) : reject(403);
   }
   if (path === '/add-standing-rule') {
-    return await store.saveStandingRule(sessionCookie, body.grants ?? body.grant, body.addresses ?? body.address, body.command, body.id)
+    return await store.saveStandingRule(sessionCookie, body.grants ?? body.grant, body.addresses ?? body.address, body.command, body.id, body.matcher)
       ? reply({ saved: true }) : reject(403);
   }
   if (path === '/remove-standing-rule') {

@@ -382,16 +382,27 @@ async function startAdmin() {
   const hostChoices = document.querySelector('#standing-host');
   const commandSelect = document.querySelector('#standing-command');
   const addRule = document.querySelector('#add-rule');
+  const matcherPanel = document.querySelector('#standing-matcher');
+  const matchKind = document.querySelector('#standing-match-kind');
+  const matchText = document.querySelector('#standing-match-text');
+  function updateMatcher() {
+    const needed = ['deny', 'require-approval'].includes(commandSelect.value);
+    matcherPanel.hidden = !needed;
+    matchText.required = needed;
+  }
+  commandSelect.onchange = updateMatcher;
   const save = form.querySelector('[type="submit"]');
   const cancel = document.querySelector('#cancel-rule');
   let editing;
 
   const diagnostics = {
+    'deny': 'Deny',
+    'require-approval': 'Require approval',
     'read-only': 'All supported read-only checks',
     uptime: 'System uptime',
     'df -h /srv/techleaddocker': 'Docker storage usage',
   };
-  const scopeLabel = command => command === 'read-only' ? diagnostics[command] : (diagnostics[command] + ' (' + command + ')');
+  const scopeLabel = command => ['read-only', 'deny', 'require-approval'].includes(command) ? diagnostics[command] : (diagnostics[command] + ' (' + command + ')');
   const hostName = host => host.name || host.address;
   const clientName = client => client.reportedName || client.name;
   const clientLabel = client => clientName(client) + ' · ' + client.id.slice(-6);
@@ -461,12 +472,15 @@ async function startAdmin() {
     for (const input of container.querySelectorAll('input')) input.checked = selected.includes(input.value);
   }
 
-  function showEditor({ clientIds = [], hostAddresses = [], command, id } = {}) {
+  function showEditor({ clientIds = [], hostAddresses = [], command, matcher, id } = {}) {
     editing = id;
     document.querySelector('#standing-form-title').textContent = id ? 'Edit standing approval' : 'Add standing approval';
     choose(clientChoices, clientIds);
     choose(hostChoices, hostAddresses);
     commandSelect.value = command ?? '';
+    matchKind.value = matcher?.kind ?? 'exact';
+    matchText.value = matcher?.text ?? '';
+    updateMatcher();
     form.hidden = false;
     status.textContent = '';
     const next = !checked(clientChoices).length ? clientChoices.querySelector('input') :
@@ -556,7 +570,9 @@ async function startAdmin() {
         return cell;
       };
       const fullyAvailable = rule.clientIds.length === rule.grants.length && rule.hostAddresses.length === rule.addresses.length;
-      const ruleAction = rule.approvedCommands ? identity('Read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
+      const ruleAction = rule.matcher
+        ? identity(scopeLabel(rule.command), (rule.matcher.kind === 'exact' ? 'Exact: ' : 'Starts with: ') + rule.matcher.text)
+        : rule.approvedCommands ? identity('Read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
       row(ruleRows, memberList(clientNames), memberList(hostNames), ruleAction,
         pill(fullyAvailable ? 'Active' : rule.available ? 'Partial' : 'Unavailable', fullyAvailable), controls);
     }
@@ -583,6 +599,7 @@ async function startAdmin() {
     try {
       await post('add-standing-rule', {
         grants, addresses, command: commandSelect.value, id: editing,
+        matcher: matcherPanel.hidden ? undefined : { kind: matchKind.value, text: matchText.value },
       });
       await loadDashboard();
       closeEditor();
