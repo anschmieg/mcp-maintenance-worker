@@ -53,6 +53,11 @@ type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
 type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; probeAddress?: string; unsupportedPlatform?: boolean; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
 const ownerSessionSeconds = 7 * 24 * 60 * 60;
+
+export function ownerSessionCookie(token: string) {
+  return `__Host-pasta-owner=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ownerSessionSeconds}`;
+}
+
 const reviewRetention = 24 * 60 * 60_000;
 const retentionScanInterval = 60 * 60_000;
 const pairingLifetime = 15 * 60_000;
@@ -115,13 +120,16 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async #ownerAuthorized(token: unknown) {
     if (typeof token !== 'string' || !/^[0-9a-f-]{72}$/u.test(token)) return false;
+    const hash = hashToken(token);
     const session = await this.ctx.storage.get<{ hash: string; expires: number }>('owner-session');
     return Boolean(session && session.expires > Date.now() &&
-      timingSafeEqual(Buffer.from(session.hash), Buffer.from(hashToken(token))));
+      timingSafeEqual(Buffer.from(session.hash), Buffer.from(hash)));
   }
 
   async authorizeReview(token: unknown) {
-    return this.#ownerAuthorized(token);
+    if (typeof token !== 'string' || !/^[0-9a-f-]{72}$/u.test(token)) return false;
+    const sessions = await this.ctx.storage.get<Record<string, number>>('oauth-review-sessions');
+    return Boolean(sessions && sessions[hashToken(token)] > Date.now()) || this.#ownerAuthorized(token);
   }
 
   async ownerState() {
@@ -177,7 +185,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const recent = Object.fromEntries(Object.entries(used).filter(([, deadline]) => deadline > now));
       await tx.put('credential', { ...credential, counter: verification.authenticationInfo.newCounter });
       await tx.put('used-owner-challenges', { ...recent, [challenge]: expires });
-      if (!context) await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
+      if (context) {
+        const sessions = await tx.get<Record<string, number>>('oauth-review-sessions') ?? {};
+        const recent = Object.entries(sessions).filter(([, deadline]) => deadline > now).slice(-31);
+        await tx.put('oauth-review-sessions', { ...Object.fromEntries(recent), [hashToken(token)]: now + ownerSessionSeconds * 1000 });
+      } else {
+        await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
+      }
       return true;
     });
     return accepted ? token : null;
@@ -966,7 +980,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const reply = (data: unknown) => Response.json(data, { headers });
   const sessionCookie = request.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-pasta-owner=([0-9a-f-]{72})(?:;|$)/u)?.[1];
   const ownerReply = (data: unknown, token: string) => Response.json(data, {
-    headers: { ...headers, 'Set-Cookie': `__Host-pasta-owner=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ownerSessionSeconds}` },
+    headers: { ...headers, 'Set-Cookie': ownerSessionCookie(token) },
   });
   if (path === '/review-session') return reply({ signedIn: await store.authorizeReview(sessionCookie) });
   if (path === '/owner-state') return reply(await store.ownerState());

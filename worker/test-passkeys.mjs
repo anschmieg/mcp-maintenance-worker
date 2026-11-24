@@ -170,6 +170,14 @@ const approval = { request: transaction, id: oauthChallenge.id, response: assert
 assert.equal((await oauthPost('approve', approval, { Origin: 'https://different.example' })).status, 400);
 const positiveApproval = await oauthPost('approve', approval, browserHeaders);
 assert.equal(positiveApproval.status, 200);
+const oauthCookie = positiveApproval.headers.get('Set-Cookie');
+assert.match(oauthCookie, /^__Host-pasta-owner=.*; HttpOnly; Secure; SameSite=Strict; Max-Age=604800$/u);
+const oauthReview = await fetch(origin + '/passkeys/review-session', {
+  method: 'POST', headers: { ...browserHeaders, 'Content-Type': 'application/json', Cookie: oauthCookie.split(';')[0] },
+  body: '{}',
+});
+assert.deepEqual(await oauthReview.json(), { signedIn: true });
+assert.equal((await post('prepare-host', { token: oauthCookie.split(';')[0].split('=')[1] })).status, 403);
 const callback = new URL((await positiveApproval.json()).redirect);
 assert.equal(callback.origin + callback.pathname, redirectUri);
 assert.equal(callback.searchParams.get('state'), params.get('state'));

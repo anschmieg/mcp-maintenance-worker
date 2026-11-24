@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
-import { approvalStore, passkeyOrigin, type PasskeyEnv } from './passkeys';
+import { approvalStore, ownerSessionCookie, passkeyOrigin, type PasskeyEnv } from './passkeys';
 
 export type OAuthEnv = PasskeyEnv & {
   OAUTH_GRANTS: DurableObjectNamespace<OAuthGrant>;
@@ -184,14 +184,17 @@ export async function oauthRoute(request: Request, env: OAuthEnv) {
       return options ? response(options) : invalid('access_denied', 403);
     }
     if (!proof.response) return invalid();
-    if (!await approvalStore(env).signIn(proof.id, proof.response as AuthenticationResponseJSON, context)) return invalid('access_denied', 403);
+    const ownerSession = await approvalStore(env).signIn(proof.id, proof.response as AuthenticationResponseJSON, context);
+    if (!ownerSession) return invalid('access_denied', 403);
     const approved = await store(env, proof.request).approve();
     if (!approved) return invalid('invalid_grant');
     const callback = new URL(approved.redirect);
     callback.searchParams.set('code', proof.request + '.' + approved.code);
     callback.searchParams.set('state', approved.state);
     callback.searchParams.set('iss', origin);
-    return response({ redirect: callback.href });
+    return Response.json({ redirect: callback.href }, {
+      headers: { ...noCache, 'Set-Cookie': ownerSessionCookie(ownerSession) },
+    });
   }
 
   if (url.pathname !== '/oauth/token' || mediaType !== 'application/x-www-form-urlencoded') return invalid();
