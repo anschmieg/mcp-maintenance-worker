@@ -75,7 +75,7 @@
   </details>
   <section id="pair-command" hidden>
     <label for="install-command">Host setup command</label>
-    <p class="hint">Run it on the Linux host you want to add from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes. Run it from a private directory and delete pasta-setup.sh after setup.</p>
+    <p class="hint"><strong>Linux hosts only.</strong> Run the command on the host you want to add, from your usual admin account. Use SSH if you’re on a different machine. The command expires after 15 minutes. Run it from a private directory and delete pasta-setup.sh after setup.</p>
     <textarea id="install-command" rows="4" readonly spellcheck="false"></textarea>
     <div class="command-actions">
       <button id="copy-install" type="button">Copy command</button>
@@ -88,6 +88,7 @@
   </section>
   <div class="actions">
     <button id="action" type="button" disabled>Continue</button>
+    <button id="cancel-waiting" class="secondary" type="button" hidden>Cancel setup</button>
     <button id="replace-failed-pair" class="secondary" type="button" hidden>Start over with a new setup command</button>
     <button id="tagged-setup" class="secondary" type="button" hidden>Use a restricted identity</button>
   </div>

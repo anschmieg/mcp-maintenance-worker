@@ -2,7 +2,11 @@ detect_host() {
   PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
   export PATH
   if [ "$(uname -s)" != Linux ]; then
-    echo 'Run this command on the Linux host you want to enroll.' >&2
+    if [ -n "${pairing_token:-}" ] && [ -n "${claim_url:-}" ]; then
+      curl -fsS --max-time 4 -o /dev/null -H "Authorization: Bearer $pairing_token" \
+        --data-urlencode 'error=unsupported_platform' "$claim_url" 2>/dev/null || :
+    fi
+    echo 'PaSTA pairs Linux hosts only. Run a fresh setup command on a Linux host.' >&2
     return 1
   fi
   if ! [ -t 0 ]; then

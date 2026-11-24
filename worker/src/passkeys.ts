@@ -51,7 +51,7 @@ type Job = {
 };
 type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
-type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; probeAddress?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
+type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; probeAddress?: string; unsupportedPlatform?: boolean; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
 const reviewRetention = 24 * 60 * 60_000;
 const retentionScanInterval = 60 * 60_000;
 const pairingLifetime = 15 * 60_000;
@@ -355,6 +355,17 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return script ? { script, status: 200 } : { error: 'PaSTA could not prepare the SSH key. Run the command again.', status: 503 };
   }
 
+  async reportUnsupportedPlatform(id: string | null, token: string) {
+    if (!id || !validPairingId(id) || !validPairingToken(token)) return false;
+    return this.ctx.storage.transaction(async tx => {
+      const slot = 'pairing:' + id;
+      const pair = await tx.get<Pairing>(slot);
+      if (!pair?.automatic || pair.address || pair.tokenHash !== hashToken(token) || pair.expires <= Date.now()) return false;
+      await tx.put(slot, { ...pair, unsupportedPlatform: true, tokenHash: '' });
+      return true;
+    });
+  }
+
   async beginPairing(token: unknown, address: unknown) {
     if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
         typeof address !== 'string' || !validTailnetIpv4(address)) return null;
@@ -520,6 +531,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const next = 'pairing:' + id;
     const slot = await this.ctx.storage.get<Pairing>(next) ? next : 'pairing';
     const pair = await this.ctx.storage.get<Pairing>(slot);
+    if (pair?.id === id && pair.unsupportedPlatform) return { state: 'unsupported_platform' };
     if (pair?.id === id && pair.accountAction === 'canceled') return { state: 'pairing_canceled' };
     if (pair?.id !== id || (!pair.fingerprint && pair.expires <= Date.now())) return { state: 'pairing_expired' };
     if (!pair.fingerprint) return { state: pair.address && pair.automatic ? 'waiting_for_confirmation' : 'waiting_for_host', host: pair.automatic ? pair.addressName : undefined };
@@ -923,6 +935,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (!auth.startsWith('Bearer ') || Number(length) > 128 ||
         request.headers.get('Content-Type')?.split(';', 1)[0].trim() !== 'application/x-www-form-urlencoded') return reject(403);
     const form = new URLSearchParams(await request.text());
+    if (form.get('error') === 'unsupported_platform' && !form.has('address')) {
+      return await store.reportUnsupportedPlatform(url.searchParams.get('pair'), auth.slice(7))
+        ? new Response(null, { status: 204, headers }) : reject(403);
+    }
     const claimed = await store.claimPairing(url.searchParams.get('pair'), auth.slice(7), form.get('address'));
     return new Response(claimed.script ?? claimed.error + '\n', {
       status: claimed.status, headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' },
