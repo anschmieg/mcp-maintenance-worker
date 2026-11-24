@@ -385,24 +385,42 @@ async function startAdmin() {
   const matcherPanel = document.querySelector('#standing-matcher');
   const matchKind = document.querySelector('#standing-match-kind');
   const matchText = document.querySelector('#standing-match-text');
-  function updateMatcher() {
-    const needed = ['deny', 'require-approval'].includes(commandSelect.value);
-    matcherPanel.hidden = !needed;
-    matchText.required = needed;
+  const presetPanel = document.querySelector('#standing-preset');
+  const decision = document.querySelector('#standing-decision');
+  const preview = document.querySelector('#rule-preview');
+  const test = document.querySelector('#test-request');
+  const testClient = document.querySelector('#test-client');
+  const testHost = document.querySelector('#test-host');
+  const testResult = document.querySelector('#test-result');
+  const testPanel = document.querySelector('#rule-test');
+  const ruleNumbers = new Map();
+  const pickers = [
+    { list: clientChoices, search: document.querySelector('#filter-clients'), summary: document.querySelector('#selected-clients') },
+    { list: hostChoices, search: document.querySelector('#filter-hosts'), summary: document.querySelector('#selected-hosts') },
+  ];
+  const decisions = { 'require-approval': 'Require approval', deny: 'Deny', allow: 'Allow without approval' };
+
+  function updateMatcher(value = decision.value) {
+    const preset = matchKind.value === 'preset';
+    matcherPanel.hidden = preset;
+    matchText.required = !preset;
+    presetPanel.hidden = !preset;
+    commandSelect.required = preset;
+    const choices = preset ? ['allow'] : ['require-approval', 'deny'];
+    options(decision, 'Select a decision', choices.map(key => [key, decisions[key]]));
+    decision.value = choices.includes(value) ? value : choices[0];
+    updatePreview();
   }
-  commandSelect.onchange = updateMatcher;
   const save = form.querySelector('[type="submit"]');
   const cancel = document.querySelector('#cancel-rule');
   let editing;
 
   const diagnostics = {
-    'deny': 'Deny',
-    'require-approval': 'Require approval',
     'read-only': 'All supported read-only checks',
     uptime: 'System uptime',
     'df -h /srv/techleaddocker': 'Docker storage usage',
   };
-  const scopeLabel = command => ['read-only', 'deny', 'require-approval'].includes(command) ? diagnostics[command] : (diagnostics[command] + ' (' + command + ')');
+  const scopeLabel = command => command === 'read-only' ? diagnostics[command] : (diagnostics[command] + ' (' + command + ')');
   const hostName = host => host.name || host.address;
   const clientName = client => client.reportedName || client.name;
   const clientLabel = client => clientName(client) + ' · ' + client.id.slice(-6);
@@ -472,19 +490,46 @@ async function startAdmin() {
     for (const input of container.querySelectorAll('input')) input.checked = selected.includes(input.value);
   }
 
+  function updatePreview() {
+    const selected = pickers.map(({ list, search, summary }) => {
+      const labels = [];
+      for (const input of list.querySelectorAll('input')) {
+        const label = input.parentElement;
+        const name = label.textContent;
+        label.hidden = !name.toLowerCase().includes(search.value.trim().toLowerCase());
+        if (input.checked) labels.push(name);
+      }
+      summary.textContent = labels.length ? labels.join(', ') : 'None selected';
+      return labels.join(' or ');
+    });
+    const condition = matchKind.value === 'preset'
+      ? commandSelect.value && scopeLabel(commandSelect.value)
+      : matchText.value.trim() && (matchKind.value === 'exact' ? 'exactly matches ' : 'starts with ') + JSON.stringify(matchText.value);
+    preview.textContent = selected.every(Boolean) && condition
+      ? decisions[decision.value] + ' when ' + selected[0] + ' requests a command on ' + selected[1] +
+        (matchKind.value === 'preset' ? ' matching ' : ' whose text ') + condition + '.'
+      : 'Select clients, hosts, and a command match to preview this rule.';
+  }
+
+  form.addEventListener('input', updatePreview);
+  matchKind.onchange = () => updateMatcher();
+
   function showEditor({ clientIds = [], hostAddresses = [], command, matcher, id } = {}) {
     editing = id;
-    document.querySelector('#standing-form-title').textContent = id ? 'Edit standing approval' : 'Add standing approval';
+    document.querySelector('#standing-form-title').textContent = id ? 'Edit rule' : 'Add rule';
     choose(clientChoices, clientIds);
     choose(hostChoices, hostAddresses);
-    commandSelect.value = command ?? '';
-    matchKind.value = matcher?.kind ?? 'exact';
+    const preset = Boolean(command && !matcher);
+    commandSelect.value = preset ? command : '';
+    matchKind.value = preset ? 'preset' : matcher?.kind ?? 'exact';
+    for (const { search } of pickers) search.value = '';
     matchText.value = matcher?.text ?? '';
-    updateMatcher();
+    updateMatcher(preset ? 'allow' : command);
     form.hidden = false;
     status.textContent = '';
     const next = !checked(clientChoices).length ? clientChoices.querySelector('input') :
-      !checked(hostChoices).length ? hostChoices.querySelector('input') : commandSelect;
+      !checked(hostChoices).length ? hostChoices.querySelector('input') : matchKind;
+    form.scrollIntoView({ block: 'nearest' });
     next?.focus();
   }
 
@@ -511,10 +556,15 @@ async function startAdmin() {
     checkboxes(hostChoices, eligibleHosts.map(host => [
       host.address, host.name ? host.name + ' (' + host.address + ')' : host.address,
     ]));
-    options(commandSelect, 'Select an action', commands.map(command => [command, scopeLabel(command)]));
+    options(commandSelect, 'Select a diagnostic', commands.filter(command => Object.hasOwn(diagnostics, command))
+      .map(command => [command, scopeLabel(command)]));
+    options(testClient, 'Select a client', activeClients.map(client => [client.id, clientLabel(client)]));
+    options(testHost, 'Select a host', eligibleHosts.map(host => [host.address, hostName(host)]));
+    testPanel.hidden = !canAddRule;
+    testResult.hidden = true;
     addRule.disabled = !canAddRule;
     const emptyRules = document.querySelector('#rules-empty');
-    emptyRules.textContent = canAddRule ? 'No standing approvals yet.' : activeClients.length
+    emptyRules.textContent = canAddRule ? 'No rules yet.' : activeClients.length
       ? 'Pair a host with command access to create a rule.' : 'Connect an MCP client through OAuth to create a rule.';
     clientRows.replaceChildren();
     for (const client of clients) {
@@ -539,7 +589,9 @@ async function startAdmin() {
     showTable('hosts', hosts.length > 0);
 
     ruleRows.replaceChildren();
-    for (const rule of rules) {
+    ruleNumbers.clear();
+    for (const [index, rule] of rules.entries()) {
+      ruleNumbers.set(rule.id, index + 1);
       const clientNames = rule.grants.map(grant => {
         const client = clients.find(item => item.id === grant);
         return client ? clientLabel(client) : 'Unlisted client · ' + grant.slice(-6);
@@ -558,10 +610,10 @@ async function startAdmin() {
           await post('remove-standing-rule', { id: rule.id });
           if (editing === rule.id) closeEditor();
           await loadDashboard();
-          reviewStatus('success', 'Standing approval revoked.');
+          reviewStatus('success', 'Rule revoked.');
         } catch {
           button.disabled = false;
-          reviewStatus('error', 'Could not revoke the standing approval. Refresh and check the rule.');
+          reviewStatus('error', 'Could not revoke the rule. Refresh and check the rule.');
         }
       }));
       const memberList = labels => {
@@ -570,19 +622,43 @@ async function startAdmin() {
         return cell;
       };
       const fullyAvailable = rule.clientIds.length === rule.grants.length && rule.hostAddresses.length === rule.addresses.length;
-      const ruleAction = rule.matcher
-        ? identity(scopeLabel(rule.command), (rule.matcher.kind === 'exact' ? 'Exact: ' : 'Starts with: ') + rule.matcher.text)
-        : rule.approvedCommands ? identity('Read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
-      row(ruleRows, memberList(clientNames), memberList(hostNames), ruleAction,
+      const commandMatch = rule.matcher
+        ? identity(rule.matcher.kind === 'exact' ? 'Exact text' : 'Starts with', rule.matcher.text)
+        : rule.approvedCommands ? identity('Supported read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
+      row(ruleRows, memberList(clientNames), memberList(hostNames), commandMatch,
+        decisions[rule.matcher ? rule.command : 'allow'],
         pill(fullyAvailable ? 'Active' : rule.available ? 'Partial' : 'Unavailable', fullyAvailable), controls);
     }
     showTable('rules', rules.length > 0);
 
-    details.textContent = 'Manage MCP clients, SSH hosts, and the diagnostics each connection can run.';
+    details.textContent = 'Manage access rules, MCP clients, and SSH hosts.';
     document.querySelector('#admin-nav').hidden = false;
     dashboard.hidden = false;
     action.hidden = true;
   }
+
+  test.oninput = () => { testResult.hidden = true; };
+  test.onsubmit = async event => {
+    event.preventDefault();
+    const submit = test.querySelector('button');
+    submit.disabled = true;
+    testResult.hidden = false;
+    testResult.textContent = 'Evaluating…';
+    try {
+      const { decision: result, matches, error } = await post('preview-standing-rules', {
+        grant: testClient.value,
+        address: testHost.value,
+        command: document.querySelector('#test-command').value,
+      });
+      const rows = matches?.map(id => ruleNumbers.get(id)).filter(Boolean).sort((a, b) => a - b);
+      testResult.textContent = error ?? (decisions[result] + '. ' +
+        (rows.length ? 'Matching table rows: ' + rows.join(', ') + '.' : 'No saved rules matched.'));
+    } catch {
+      testResult.textContent = 'Could not evaluate the request. Refresh the dashboard and try again.';
+    } finally {
+      submit.disabled = false;
+    }
+  };
 
   addRule.onclick = () => showEditor();
   cancel.onclick = closeEditor;
@@ -598,12 +674,12 @@ async function startAdmin() {
     save.disabled = true;
     try {
       await post('add-standing-rule', {
-        grants, addresses, command: commandSelect.value, id: editing,
+        grants, addresses, command: presetPanel.hidden ? decision.value : commandSelect.value, id: editing,
         matcher: matcherPanel.hidden ? undefined : { kind: matchKind.value, text: matchText.value },
       });
       await loadDashboard();
       closeEditor();
-      reviewStatus('success', 'Standing approval saved.');
+      reviewStatus('success', 'Rule saved.');
     } catch {
       reviewStatus('error', 'Could not save the rule. Check that the connection and host are still available and the rule is unique.');
     } finally {

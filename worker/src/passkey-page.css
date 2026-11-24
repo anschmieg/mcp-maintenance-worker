@@ -249,3 +249,18 @@ code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
     --admin-positive-bg: #183a31;
   }
 }
+
+#approval-rules { margin-bottom: 1rem; }
+#standing-form .admin-form-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.admin-selection, .admin-preview { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; }
+.admin-selection { margin: .4rem 0; }
+.admin-preview { margin: .8rem 0 0; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: .45rem; }
+.admin-test { border-top: 1px solid var(--line); padding: .85rem 1.1rem; }
+.admin-test summary { cursor: pointer; font-weight: 650; }
+.admin-test button { margin-top: .65rem; }
+#rules-table td { white-space: normal; }
+@media (max-width: 38rem) {
+  #standing-form .admin-form-fields { grid-template-columns: minmax(0, 1fr); }
+}
+#standing-form fieldset > label + label { margin-top: .65rem; }
+#standing-form input[type="search"] { min-height: 2.55rem; padding: .4rem .55rem; font-size: .875rem; }

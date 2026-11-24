@@ -31,6 +31,55 @@
   <div class="actions"><button id="action" type="button" hidden>Sign in with passkey</button></div>
   <p id="status" class="status" role="status"></p>
   <div id="standing-rules" hidden>
+    <section class="admin-panel" id="approval-rules" aria-labelledby="rule-heading">
+      <div class="admin-panel-header">
+        <div><h2 id="rule-heading">Rules</h2><p>Requests that do not match a rule require passkey approval.</p></div>
+        <button id="add-rule" type="button">Add rule</button>
+      </div>
+      <p class="admin-empty" id="rules-empty">No rules yet.</p>
+      <div class="admin-table-wrap" id="rules-table" hidden>
+        <table aria-labelledby="rule-heading">
+          <thead><tr><th scope="col">MCP clients</th><th scope="col">SSH hosts</th><th scope="col">Command match</th><th scope="col">Decision</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
+          <tbody id="standing-list"></tbody>
+        </table>
+      </div>
+      <form id="standing-form" hidden>
+        <h3 id="standing-form-title">Add rule</h3>
+        <div class="admin-form-fields">
+          <fieldset><legend>MCP clients</legend><label>Search clients <input type="search" id="filter-clients"></label><p class="admin-selection" id="selected-clients"></p><div class="admin-checkboxes" id="standing-client"></div></fieldset>
+          <fieldset><legend>SSH hosts</legend><label>Search hosts <input type="search" id="filter-hosts"></label><p class="admin-selection" id="selected-hosts"></p><div class="admin-checkboxes" id="standing-host"></div></fieldset>
+          <fieldset>
+            <legend>Command match</legend>
+            <label>Condition <select id="standing-match-kind"><option value="exact">Command text is exactly</option><option value="prefix">Command text starts with</option><option value="preset">Supported diagnostic</option></select></label>
+            <label id="standing-matcher">Command text <textarea id="standing-match-text" rows="2" maxlength="4096"></textarea></label>
+            <label id="standing-preset" hidden>Diagnostic <select id="standing-command"></select></label>
+          </fieldset>
+          <fieldset>
+            <legend>Decision</legend>
+            <label>When the rule matches <select id="standing-decision" required></select></label>
+            <p class="hint">Deny takes precedence, followed by Require approval, then Allow without approval.</p>
+          </fieldset>
+        </div>
+        <p id="rule-preview" class="admin-preview"></p>
+        <div class="admin-form-actions">
+          <button type="submit">Save rule</button>
+          <button id="cancel-rule" type="button" class="secondary">Cancel</button>
+        </div>
+      </form>
+      <details class="admin-test" id="rule-test">
+        <summary>Test a request</summary>
+        <form id="test-request">
+          <p class="hint">Evaluate the saved rules without creating a request or running a command.</p>
+          <div class="admin-form-fields">
+            <label>MCP client <select id="test-client" required></select></label>
+            <label>SSH host <select id="test-host" required></select></label>
+            <label>Command <textarea id="test-command" rows="2" maxlength="4096" required></textarea></label>
+          </div>
+          <button type="submit">Evaluate</button>
+          <p id="test-result" class="admin-preview" role="status" hidden></p>
+        </form>
+      </details>
+    </section>
     <div class="admin-inventory">
       <section class="admin-panel" id="mcp-clients" aria-labelledby="client-heading">
         <div class="admin-panel-header"><h2 id="client-heading">MCP clients</h2></div>
@@ -56,38 +105,7 @@
         </div>
       </section>
     </div>
-    <section class="admin-panel" id="approval-rules" aria-labelledby="rule-heading">
-      <div class="admin-panel-header">
-        <div><h2 id="rule-heading">Standing approvals</h2><p>Requests outside these rules require passkey approval.</p></div>
-        <button id="add-rule" type="button">Add rule</button>
-      </div>
-      <form id="standing-form" hidden>
-        <h3 id="standing-form-title">Add standing approval</h3>
-        <div class="admin-form-fields">
-          <fieldset><legend>MCP clients</legend><div class="admin-checkboxes" id="standing-client"></div></fieldset>
-          <fieldset><legend>SSH hosts</legend><div class="admin-checkboxes" id="standing-host"></div></fieldset>
-          <div>
-            <label>Action <select id="standing-command" required aria-describedby="standing-scope-hint"></select></label>
-            <p class="hint" id="standing-scope-hint">Denied requests take precedence over requests requiring approval, then standing approvals. Rules apply to new requests.</p>
-            <div id="standing-matcher" hidden>
-              <label>Command match <select id="standing-match-kind"><option value="exact">Exact text</option><option value="prefix">Starts with</option></select></label>
-              <label>Command text <textarea id="standing-match-text" rows="2" maxlength="4096"></textarea></label>
-            </div>
-          </div>
-        </div>
-        <div class="admin-form-actions">
-          <button type="submit">Save rule</button>
-          <button id="cancel-rule" type="button" class="secondary">Cancel</button>
-        </div>
-      </form>
-      <p class="admin-empty" id="rules-empty">No standing approvals yet.</p>
-      <div class="admin-table-wrap" id="rules-table" hidden>
-        <table aria-labelledby="rule-heading">
-          <thead><tr><th scope="col">MCP clients</th><th scope="col">SSH hosts</th><th scope="col">Action</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
-          <tbody id="standing-list"></tbody>
-        </table>
-      </div>
-    </section>
+
   </div>
 </main>
 </body>

@@ -668,6 +668,45 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return this.start(jobId, true, address, command === commandRestart, command, statement, parser, grant);
   }
 
+  async #evaluateRules(tx: DurableObjectStorage | DurableObjectTransaction, command: string, grant: string, host: Host, canUseRule: boolean) {
+    const applicable = [...(await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values()].map(expandRule).filter(rule =>
+      rule.grants.includes(grant) && rule.targets.some(item => item.address === host.address && item.enrollment === host.enrollmentId));
+    const matches = ({ matcher }: StandingRule) => matcher &&
+      (matcher.kind === 'exact' ? command === matcher.text : command.startsWith(matcher.text));
+    const denied = applicable.filter(rule => rule.command === 'deny' && matches(rule));
+    const review = applicable.filter(rule => rule.command === 'require-approval' && matches(rule));
+    const standing = canUseRule ? applicable.filter(rule =>
+      rule.command === command || rule.approvedCommands?.some(approved => approved === command)) : [];
+    const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, host.account ?? legacyAccount, command]));
+    const allows = !denied.length && !review.length && standing.length > 0 &&
+      !await tx.get('removing-host:' + host.address) &&
+      sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host) && !await tx.get(retryLock);
+    return {
+      decision: denied.length ? 'deny' : allows ? 'allow' : 'require-approval',
+      matches: [...denied, ...review, ...standing].map(({ id }) => id),
+      standingRule: allows ? standing[0].id : undefined,
+      retryLock,
+    };
+  }
+
+  async previewStandingRules(token: unknown, grant: unknown, address: unknown, command: unknown) {
+    if (!await this.#ownerAuthorized(token)) return null;
+    if (typeof grant !== 'string' || !validGrant.test(grant) || typeof address !== 'string' || !validTailnetIpv4(address) ||
+        typeof command !== 'string' || !command.trim() || command.length > 4096) return { error: 'Enter a client, host, and command.' };
+    const parser = await classify(command).catch(() => undefined);
+    if (!parser) return { error: 'Command validation is unavailable.' };
+    if (parser.decision === 'invalid') return { error: 'PaSTA rejected the command syntax.' };
+    return this.ctx.storage.transaction(async tx => {
+      const client = await tx.get<McpConnection>('mcp-connection:' + grant);
+      const host = await tx.get<Host>('onboarding-host:' + address);
+      if (!client || client.expires <= Date.now() || !host?.enrollmentId || !host.signedApproval ||
+          !host.commandExecution || await tx.get('removing-host:' + address)) return { error: 'Select an authorized client and a ready host.' };
+      const { decision, matches } = await this.#evaluateRules(tx, command, grant, host,
+        parser.decision === 'auto_candidate' && standingCommand(command));
+      return { decision, matches };
+    });
+  }
+
   async start(jobId: string, enrollment = false, address?: string, restart = false, command?: string, statement?: string, parser?: Awaited<ReturnType<typeof classify>>, grant?: string) {
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
@@ -720,26 +759,15 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
           existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId &&
           Boolean(existing.target.commandExecution) === Boolean(target.commandExecution) &&
           Boolean(existing.target.signedApproval) === Boolean(target.signedApproval)));
-      const applicable = command && grant && host?.enrollmentId
-        ? [...(await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values()].map(expandRule).filter(rule =>
-          rule.grants.includes(grant) && rule.targets.some(item => item.address === host.address && item.enrollment === host.enrollmentId))
-        : [];
-      const matchesCommand = ({ matcher }: StandingRule) => Boolean(matcher && command &&
-        (matcher.kind === 'exact' ? command === matcher.text : command.startsWith(matcher.text)));
-      if (applicable.some(rule => rule.command === 'deny' && matchesCommand(rule))) return 'denied';
+      const policy = command && grant && host?.enrollmentId
+        ? await this.#evaluateRules(tx, command, grant, host, Boolean(canUseRule)) : undefined;
+      if (policy?.decision === 'deny') return 'denied';
       const job: Job = { target, options, ...(command ? { command, statement, hostName, scope } : {}),
         expires_at: Date.now() + this.#jobLifetime() };
-      if (canUseRule && host && !applicable.some(rule => rule.command === 'require-approval' && matchesCommand(rule)) &&
-          !await tx.get('removing-host:' + host.address) &&
-          sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host)) {
-        const rule = applicable.find(item =>
-          item.command === command || item.approvedCommands?.some(approved => approved === command));
-        const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, target.execution_identity, command]));
-        if (rule && !await tx.get(retryLock)) {
-          await tx.put(retryLock, key);
-          Object.assign(job, { approved_at: Date.now(), execution_owner: this.#executionOwner, standing_rule: rule.id, retry_lock: retryLock });
-          standingAccepted = true;
-        }
+      if (policy?.standingRule) {
+        await tx.put(policy.retryLock, key);
+        Object.assign(job, { approved_at: Date.now(), execution_owner: this.#executionOwner, standing_rule: policy.standingRule, retry_lock: policy.retryLock });
+        standingAccepted = true;
       }
       await tx.put<Job>(key, job);
       return true;
@@ -1166,6 +1194,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/standing-rules') {
     const rules = await store.standingRules(sessionCookie);
     return rules ? reply(rules) : reject(403);
+  }
+  if (path === '/preview-standing-rules') {
+    const result = await store.previewStandingRules(sessionCookie, body.grant, body.address, body.command);
+    return result ? reply(result) : reject(403);
   }
   if (path === '/add-standing-rule') {
     return await store.saveStandingRule(sessionCookie, body.grants ?? body.grant, body.addresses ?? body.address, body.command, body.id, body.matcher)
