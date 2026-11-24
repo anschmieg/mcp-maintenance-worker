@@ -187,9 +187,19 @@ function hostSetup(token) {
     const panel = document.querySelector('#pair-command');
     const copy = document.querySelector('#copy-install');
     const script = document.querySelector('#script-preview');
+    const cancelWaiting = document.querySelector('#cancel-waiting');
     const replaceFailed = document.querySelector('#replace-failed-pair');
     const activePair = sessionStorage.getItem('pasta-pair');
+    let lastPairId = activePair;
     const failure = 'Could not check the pairing. Try again.';
+
+    function clearSetupCommand() {
+      command.value = '';
+      copy.disabled = true;
+      copy.onclick = null;
+      panel.hidden = true;
+      cancelWaiting.hidden = true;
+    }
 
     async function waitForPair(pairId, retry = false) {
       replaceFailed.hidden = true;
@@ -200,7 +210,7 @@ function hostSetup(token) {
         if (sessionStorage.getItem('pasta-pair') !== pairId) return;
         if (progress.state === 'verified') {
           sessionStorage.removeItem('pasta-pair');
-          panel.hidden = true;
+          clearSetupCommand();
           title.textContent = 'Host paired and verified';
           details.textContent = progress.host + ' is ready for maintenance.';
           status.textContent = '';
@@ -208,7 +218,7 @@ function hostSetup(token) {
           return;
         }
         if (progress.state === 'verification_failed') {
-          panel.hidden = true;
+          clearSetupCommand();
           const messages = {
             host_key_unverified: 'The SSH host key did not match. Check that OpenSSH is serving the key on this host.',
             ssh_authentication_failed: 'The host rejected the SSH key. Check SSH access for the account in the terminal.',
@@ -231,14 +241,31 @@ function hostSetup(token) {
           };
           return;
         }
-        if (progress.state === 'pairing_canceled' || progress.state === 'pairing_expired') {
+        if (['pairing_canceled', 'pairing_expired', 'unsupported_platform'].includes(progress.state)) {
           sessionStorage.removeItem('pasta-pair');
-          panel.hidden = true;
-          status.textContent = progress.state === 'pairing_canceled' ? 'Host pairing was canceled in the terminal.'
-            : 'This command expired. Generate a fresh one to continue.';
+          clearSetupCommand();
+          status.textContent = {
+            pairing_canceled: 'Host pairing was canceled in the terminal.',
+            pairing_expired: 'This command expired. Generate a fresh one to continue.',
+            unsupported_platform: 'This computer cannot be paired. Generate a fresh setup command for a Linux host.',
+          }[progress.state];
           bind('Get a new setup command', newPair, failure);
           return;
         }
+        cancelWaiting.hidden = progress.state !== 'waiting_for_host';
+        cancelWaiting.onclick = async () => {
+          cancelWaiting.disabled = true;
+          try {
+            await discardPair(pairId);
+            clearSetupCommand();
+            status.textContent = 'Host setup canceled.';
+            bind('Get a new setup command', newPair, failure);
+          } catch {
+            status.textContent = 'Could not cancel host setup. Try again.';
+          } finally {
+            cancelWaiting.disabled = false;
+          }
+        };
         status.textContent = progress.state === 'verifying' ? 'Verifying SSH on ' + (progress.host ?? 'the host') + '…'
           : progress.state === 'waiting_for_confirmation' ? 'Detected ' + (progress.host ?? 'the host') + '. Confirm pairing in the terminal.'
           : 'Waiting for you to run the setup command on a host.';
@@ -249,13 +276,18 @@ function hostSetup(token) {
 
     async function newPair() {
       replaceFailed.hidden = true;
+      clearSetupCommand();
+      status.textContent = 'Generating a fresh setup command…';
       const pair = await post('begin-host-pairing', { token });
+      if (!pair.id || pair.id === lastPairId || !pair.installCommand) throw new Error('No fresh pairing command');
+      lastPairId = pair.id;
       sessionStorage.setItem('pasta-pair', pair.id);
       title.textContent = 'Add a host';
-      details.textContent = 'Run this command on the Linux host you want to add. Confirm the detected device in the terminal.';
+      details.textContent = 'Copy the new setup command and run it on the Linux host you want to add.';
       command.value = pair.installCommand;
       panel.hidden = false;
-      copy.textContent = 'Copy command';
+      copy.textContent = 'Copy new setup command';
+      copy.disabled = false;
       script.value = '';
       delete script.dataset.loaded;
       script.parentElement.open = false;
@@ -271,11 +303,14 @@ function hostSetup(token) {
         }
       };
       copy.onclick = async () => {
+        if (sessionStorage.getItem('pasta-pair') !== pair.id) return;
         try {
-          await navigator.clipboard.writeText(command.value);
-          copy.textContent = 'Copied';
+          await navigator.clipboard.writeText(pair.installCommand);
+          if (sessionStorage.getItem('pasta-pair') === pair.id) copy.textContent = 'New command copied';
         } catch {
+          if (sessionStorage.getItem('pasta-pair') !== pair.id) return;
           command.select();
+          copy.textContent = 'Copy selected command manually';
         }
       };
       bind('Replace setup command', () => replacePair(pair.id), failure);
@@ -286,9 +321,14 @@ function hostSetup(token) {
       });
     }
 
-    async function replacePair(pairId) {
+    async function discardPair(pairId) {
       const result = await post('cancel-pairing', { token, id: pairId });
       if (result.state !== 'invalidated') throw new Error('Pairing was not discarded');
+      if (sessionStorage.getItem('pasta-pair') === pairId) sessionStorage.removeItem('pasta-pair');
+    }
+
+    async function replacePair(pairId) {
+      await discardPair(pairId);
       await newPair();
     }
 

@@ -404,6 +404,17 @@ assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, 1);
 console.log('PASS: exact service restart uses one owner passkey, is target-bound, and executes once');
 
 await fetch(fixture + '/mode/automatic-discovery', { method: 'POST' });
+const macPair = await (await post('begin-host-pairing', { token: setupToken })).json();
+const reportUnsupported = token => fetch(origin + '/passkeys/claim-host?pair=' + macPair.id, {
+  method: 'POST', headers: { Authorization: 'Bearer ' + token },
+  body: new URLSearchParams({ error: 'unsupported_platform' }),
+});
+assert.equal((await reportUnsupported(mcpToken)).status, 403);
+assert.equal((await reportUnsupported(macPair.download.token)).status, 204);
+assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: macPair.id })).json(),
+  { state: 'unsupported_platform' });
+assert.equal((await downloadPairingScript(macPair)).status, 403);
+assert.equal((await reportUnsupported(macPair.download.token)).status, 403);
 const detectedPair = await (await post('begin-host-pairing', { token: setupToken })).json();
 assert.match(detectedPair.id, /^[A-Za-z0-9]{8}$/u);
 assert.match(detectedPair.download.token, /^[A-Za-z0-9]{10}$/u);
