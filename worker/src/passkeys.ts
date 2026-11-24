@@ -55,7 +55,7 @@ type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic
 const ownerSessionSeconds = 7 * 24 * 60 * 60;
 
 export function ownerSessionCookie(token: string) {
-  return `__Host-pasta-owner=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ownerSessionSeconds}`;
+  return `__Host-pasta-owner=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${ownerSessionSeconds}`;
 }
 
 const reviewRetention = 24 * 60 * 60_000;
@@ -122,8 +122,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (typeof token !== 'string' || !/^[0-9a-f-]{72}$/u.test(token)) return false;
     const hash = hashToken(token);
     const session = await this.ctx.storage.get<{ hash: string; expires: number }>('owner-session');
-    return Boolean(session && session.expires > Date.now() &&
-      timingSafeEqual(Buffer.from(session.hash), Buffer.from(hash)));
+    const sessions = await this.ctx.storage.get<Record<string, number>>('owner-sessions');
+    return Boolean((sessions?.[hash] ?? 0) > Date.now() ||
+      (session && session.expires > Date.now() && timingSafeEqual(Buffer.from(session.hash), Buffer.from(hash))));
   }
 
   async authorizeReview(token: unknown) {
@@ -190,7 +191,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         const recent = Object.entries(sessions).filter(([, deadline]) => deadline > now).slice(-31);
         await tx.put('oauth-review-sessions', { ...Object.fromEntries(recent), [hashToken(token)]: now + ownerSessionSeconds * 1000 });
       } else {
-        await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
+        const sessions = await tx.get<Record<string, number>>('owner-sessions') ?? {};
+        const active = Object.entries(sessions).filter(([, deadline]) => deadline > now).slice(-31);
+        await tx.put('owner-sessions', { ...Object.fromEntries(active), [hashToken(token)]: now + ownerSessionSeconds * 1000 });
       }
       return true;
     });
@@ -791,6 +794,13 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return { host: address ?? hostCheck.host, state: this.env.HOST_PROBE ? 'awaiting_check' : 'unconfigured', ...empty };
   }
 
+  async reviewAvailability(jobId: string) {
+    const job = await this.ctx.storage.get<Job>('job:' + jobId);
+    if (!job) return 'unknown';
+    if (job.approved_at) return 'answered';
+    return job.expires_at <= Date.now() ? 'expired' : 'pending';
+  }
+
   async reviewOptions(jobId: string) {
     const job = await this.ctx.storage.get<Job>('job:' + jobId);
     if (!job || job.approved_at || job.expires_at <= Date.now() ||
@@ -984,7 +994,12 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const ownerReply = (data: unknown, token: string) => Response.json(data, {
     headers: { ...headers, 'Set-Cookie': ownerSessionCookie(token) },
   });
-  if (path === '/review-session') return reply({ signedIn: await store.authorizeReview(sessionCookie) });
+  if (path === '/review-session') {
+    const signedIn = await store.authorizeReview(sessionCookie);
+    if (body.job === undefined) return reply({ signedIn });
+    if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
+    return reply({ signedIn, availability: await store.reviewAvailability(body.job) });
+  }
   if (path === '/owner-state') return reply(await store.ownerState());
   if (path === '/sign-in-options') {
     const options = await store.signInOptions();

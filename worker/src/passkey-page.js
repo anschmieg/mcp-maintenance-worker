@@ -489,6 +489,7 @@ if (location.pathname.endsWith('/onboard')) {
   }
 
   async function loadReview() {
+    action.hidden = false;
     let review;
     try {
       review = await post('review-options', { job, token });
@@ -546,16 +547,34 @@ if (location.pathname.endsWith('/onboard')) {
 
   if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(job ?? '')) {
     title.textContent = 'Open approval request';
-    details.textContent = 'Sign in with your passkey to view the request.';
-    bind('Sign in with passkey', async () => {
-      const { id, options: optionsJSON } = await post('sign-in-options', {});
-      const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
-      ({ token } = await post('sign-in', { id, response }));
-      await loadReview();
-    }, 'Sign-in did not complete. Try again.');
-    void post('review-session', {}).then(({ signedIn }) => {
+    action.hidden = true;
+    async function checkReviewSession() {
+      const { signedIn, availability } = await post('review-session', { job });
+      if (availability !== 'pending') {
+        action.hidden = true;
+        details.textContent = '';
+        if (availability === 'answered') {
+          reviewStatus('error', 'This approval request has already been answered.');
+        } else {
+          showResult({ state: availability });
+        }
+        return;
+      }
       if (signedIn) return loadReview();
-    }).catch(() => {});
+      details.textContent = 'Sign in with your passkey to view the request.';
+      action.hidden = false;
+      bind('Sign in with passkey', async () => {
+        const { id, options: optionsJSON } = await post('sign-in-options', {});
+        const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
+        ({ token } = await post('sign-in', { id, response }));
+        await loadReview();
+      }, 'Sign-in did not complete. Try again.');
+    }
+    void checkReviewSession().catch(() => {
+      action.hidden = false;
+      bind('Retry', checkReviewSession, 'PaSTA could not load this request.');
+      reviewStatus('error', 'PaSTA could not load this request.');
+    });
   } else {
     showResult({ state: 'unknown' });
   }

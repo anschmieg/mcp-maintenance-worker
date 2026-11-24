@@ -121,7 +121,7 @@ const ownerAssertion = assertion(0x05, origin, ownerSignIn.options.challenge);
 assert.equal((await post('sign-in', { id: ownerSignIn.id, response: assertion(0x01, origin, ownerSignIn.options.challenge) })).status, 403);
 const sessionResponse = await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion });
 const ownerCookie = sessionResponse.headers.get('Set-Cookie');
-assert.match(ownerCookie, /^__Host-pasta-owner=[0-9a-f-]{72}; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800$/u);
+assert.match(ownerCookie, /^__Host-pasta-owner=[0-9a-f-]{72}; Path=\/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800$/u);
 const cookieRequest = (route, body) => fetch(origin + '/passkeys/' + route, {
   method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: ownerCookie.split(';')[0] },
   body: JSON.stringify(body),
@@ -134,7 +134,12 @@ assert.equal((await cookieRequest('approve', { job })).status, 409);
 assert.equal(sessionResponse.status, 200);
 setupToken = (await sessionResponse.json()).token;
 assert.notEqual(setupToken, firstSession);
-assert.equal((await post('prepare-host', { token: firstSession })).status, 403);
+assert.equal((await post('prepare-host', { token: firstSession })).status, 200);
+const otherBrowser = await post('sign-in', {
+  id: laterSignIn.id, response: assertion(0x05, origin, laterSignIn.options.challenge),
+});
+assert.equal(otherBrowser.status, 200);
+assert.deepEqual(await (await cookieRequest('review-session', {})).json(), { signedIn: true });
 assert.equal((await post('sign-in', { id: ownerSignIn.id, response: ownerAssertion })).status, 403);
 
 const webAuthnLibrary = await (await fetch(origin + '/passkeys/webauthn.js')).text();
@@ -178,7 +183,7 @@ assert.equal((await oauthPost('approve', approval, { Origin: 'https://different.
 const positiveApproval = await oauthPost('approve', approval, browserHeaders);
 assert.equal(positiveApproval.status, 200);
 const oauthCookie = positiveApproval.headers.get('Set-Cookie');
-assert.match(oauthCookie, /^__Host-pasta-owner=.*; HttpOnly; Secure; SameSite=Strict; Max-Age=604800$/u);
+assert.match(oauthCookie, /^__Host-pasta-owner=.*; HttpOnly; Secure; SameSite=Lax; Max-Age=604800$/u);
 const oauthReview = await fetch(origin + '/passkeys/review-session', {
   method: 'POST', headers: { ...browserHeaders, 'Content-Type': 'application/json', Cookie: oauthCookie.split(';')[0] },
   body: '{}',
@@ -337,6 +342,10 @@ assert.deepEqual(repeated.map(result => result.status).sort(), [200, 409]);
 const approved = await call('passkey_test_status', job);
 assert.equal(approved.state, 'verified_dry_run');
 assert.ok(approved.approved_at);
+assert.deepEqual(await (await post('review-session', { job })).json(), {
+  signedIn: false, availability: 'answered',
+});
+assert.equal((await post('job-status', { job, token: null })).status, 403);
 assert.deepEqual(await call('start_passkey_test', job), approved);
 assert.equal((await call('passkey_test_status', second)).state, 'pending');
 console.log('PASS: passkey enrollment, origin and user verification, job binding, concurrent replay, and MCP reconnect');
