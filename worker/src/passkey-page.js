@@ -389,7 +389,7 @@ async function startAdmin() {
   const decision = document.querySelector('#standing-decision');
   const categoryPanel = document.querySelector('#standing-category');
   const categorySelect = document.querySelector('#standing-category-value');
-  const categoryLabels = { 'read-only': 'Verified read-only', write: 'Shell writes to a file', execution: 'Invokes a command', unclear: 'Effects unclear' };
+  let categoryLabels = Object.create(null);
   const preview = document.querySelector('#rule-preview');
   const test = document.querySelector('#test-request');
   const testClient = document.querySelector('#test-client');
@@ -555,7 +555,7 @@ async function startAdmin() {
   }
 
   async function loadDashboard() {
-    const { clients, hosts, rules, commands, semanticCategories, sharedBearerConfigured } = await post('standing-rules', {});
+    const { clients, hosts, rules, commands, semanticLabels, sharedBearerConfigured } = await post('standing-rules', {});
     const activeClients = clients.filter(client => client.active);
     const eligibleHosts = hosts.filter(host => host.state === 'ready');
     const canAddRule = activeClients.length > 0 && eligibleHosts.length > 0;
@@ -568,7 +568,8 @@ async function startAdmin() {
     ]));
     options(commandSelect, 'Select a diagnostic', commands.filter(command => Object.hasOwn(diagnostics, command))
       .map(command => [command, scopeLabel(command)]));
-    options(categorySelect, 'Select a category', semanticCategories.map(category => [category, categoryLabels[category]]));
+    categoryLabels = Object.assign(Object.create(null), semanticLabels);
+    options(categorySelect, 'Select a parsed condition', Object.entries(categoryLabels));
     options(testClient, 'Select a client', activeClients.map(client => [client.id, clientLabel(client)]));
     options(testHost, 'Select a host', eligibleHosts.map(host => [host.address, hostName(host)]));
     testPanel.hidden = !canAddRule;
@@ -681,7 +682,7 @@ async function startAdmin() {
       const rows = matches?.map(id => ruleNumbers.get(id)).filter(Boolean).sort((a, b) => a - b);
       testResult.textContent = error ?? (decisions[result] + '. ' +
         (rows.length ? 'Matching rules: ' + rows.join(', ') + '.' : 'No saved rules matched.') +
-        (categories.length ? ' Parsed as: ' + categories.map(category => categoryLabels[category]).join(', ') + '.' : ''));
+        (categories.length ? ' Parsed as: ' + categories.map(category => (categoryLabels[category] ?? category)).join(', ') + '.' : ''));
     } catch {
       testResult.textContent = 'Could not evaluate the request. Refresh the dashboard and try again.';
     } finally {

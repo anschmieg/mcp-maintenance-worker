@@ -50,9 +50,9 @@
           <fieldset><legend>SSH hosts</legend><label>Search hosts <input type="search" id="filter-hosts"></label><p class="admin-selection" id="selected-hosts"></p><div class="admin-checkboxes" id="standing-host"></div></fieldset>
           <fieldset>
             <legend>Command match</legend>
-            <label>Condition <select id="standing-match-kind"><option value="exact">Command text is exactly</option><option value="prefix">Command text starts with</option><option value="semantic">Parsed command category</option><option value="preset">Supported diagnostic</option></select></label>
+            <label>Condition <select id="standing-match-kind"><option value="exact">Command text is exactly</option><option value="prefix">Command text starts with</option><option value="semantic">Bash syntax tree</option><option value="preset">Supported diagnostic</option></select></label>
             <label id="standing-matcher">Command text <textarea id="standing-match-text" rows="2" maxlength="4096"></textarea></label>
-            <label id="standing-category" hidden>Category <select id="standing-category-value"></select></label>
+            <label id="standing-category" hidden>Parsed condition <select id="standing-category-value"></select></label>
             <label id="standing-preset" hidden>Diagnostic <select id="standing-command"></select></label>
           </fieldset>
           <fieldset>

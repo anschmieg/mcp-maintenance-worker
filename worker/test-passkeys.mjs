@@ -760,6 +760,15 @@ for (const command of ['echo ok > example', 'printf ok >> example']) {
 assert.equal((await previewPolicy({ ...previewInput, command: 'cat < example' })).decision, 'require-approval');
 assert.equal((await standingRequest(randomUUID(), address, 'echo ok > example', secondToken)).state, 'denied_by_policy');
 assert.deepEqual((await previewPolicy({ ...previewInput, command: '  uptime  ' })).categories, ['read-only', 'execution']);
+const pipelinePolicy = { ...members, command: 'deny', matcher: { kind: 'semantic', text: 'pipeline' } };
+assert.equal((await cookieRequest('add-standing-rule', pipelinePolicy)).status, 200);
+const pipelinePreview = await previewPolicy({ ...previewInput, command: 'printf ok | cat' });
+assert.equal(pipelinePreview.decision, 'deny');
+assert.ok(pipelinePreview.categories.includes('pipeline'));
+const quotedPipe = await previewPolicy({ ...previewInput, command: "printf '%s' 'ok | cat'" });
+assert.equal(quotedPipe.decision, 'require-approval');
+assert.ok(!quotedPipe.categories.includes('pipeline'));
+assert.equal((await standingRequest(randomUUID(), address, 'printf ok | cat', secondToken)).state, 'denied_by_policy');
 const denyId = deniedPreview.matches[0];
 const askId = deniedPreview.matches[1];
 const moveFirst = async id => {

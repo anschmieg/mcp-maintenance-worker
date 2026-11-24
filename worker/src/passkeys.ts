@@ -25,7 +25,33 @@ const standingCommands = ['uptime', 'df -h /srv/techleaddocker'] as const;
 type StandingCommand = typeof standingCommands[number];
 type McpConnection = { id: string; name: string; reportedName?: string; reportedNames?: string[]; callback: string; connectedAt: number; expires: number };
 type StandingScope = StandingCommand | 'read-only' | 'require-approval' | 'deny';
-const semanticCategories = ['read-only', 'write', 'execution', 'unclear'];
+const semanticLabels: Readonly<Record<string, string>> = {
+  'read-only': 'Verified read-only',
+  write: 'Shell redirects output to a file or opens it for read/write',
+  execution: 'Contains a command invocation',
+  unclear: 'Effects unclear',
+  'output-overwrite': 'Redirects output to a file (overwrite)',
+  'output-append': 'Redirects output to a file (append)',
+  'read-write-redirect': 'Opens a file for reading and writing',
+  'file-input': 'Redirects input from a file',
+  'inline-input': 'Uses a here-document or here-string',
+  'descriptor-redirect': 'Redirects or closes a file descriptor',
+  pipeline: 'Uses a pipeline',
+  'conditional-chain': 'Uses && or ||',
+  'command-substitution': 'Uses command substitution',
+  'process-substitution': 'Uses process substitution',
+  'parameter-expansion': 'Uses parameter expansion',
+  arithmetic: 'Uses shell arithmetic',
+  assignment: 'Assigns a shell variable',
+  subshell: 'Uses a subshell group',
+  'command-group': 'Uses a brace group',
+  branch: 'Uses if or case',
+  loop: 'Uses a shell loop',
+  'function-definition': 'Defines a shell function',
+  'background-job': 'Runs a job in the background',
+  coprocess: 'Starts a coprocess',
+  negation: 'Negates a command status',
+};
 type CommandMatch = { kind: 'exact' | 'prefix' | 'semantic'; text: string };
 type RuleHost = { address: string; enrollment: string };
 type StandingRule = {
@@ -933,7 +959,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const clients = [...connections.values()].sort((a, b) => b.connectedAt - a.connectedAt)
       .map(connection => ({ ...connection, active: connection.expires > now }));
     return {
-      clients, hosts, semanticCategories, commands: ['require-approval', 'deny', 'read-only', ...standingCommands],
+      clients, hosts, semanticLabels, commands: ['require-approval', 'deny', 'read-only', ...standingCommands],
       sharedBearerConfigured: (this.env.MCP_BEARER_TOKEN?.length ?? 0) >= 32,
       rules: orderedRules(rules.values()).map(({ id, grants, targets, command, approvedCommands, matcher }) => {
         const clientIds = grants.filter(grant => (connections.get('mcp-connection:' + grant)?.expires ?? 0) > now);
@@ -956,7 +982,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const value = input as Partial<CommandMatch> | null | undefined;
       if ((value?.kind !== 'exact' && value?.kind !== 'prefix' && value?.kind !== 'semantic') ||
           typeof value.text !== 'string' || !value.text.trim() || new TextEncoder().encode(value.text).length > 4096) return false;
-      if (value.kind === 'semantic' && !semanticCategories.includes(value.text)) return false;
+      if (value.kind === 'semantic' && !Object.hasOwn(semanticLabels, value.text)) return false;
       matcher = { kind: value.kind, text: value.text };
     }
     const grants = selection(grant, item => validGrant.test(item));

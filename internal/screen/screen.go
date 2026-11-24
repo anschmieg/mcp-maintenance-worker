@@ -16,36 +16,35 @@ func Command(command string) (string, string) {
 }
 
 func Analyze(command string) (decision, reason string, facts []string) {
+	decision, reason, facts, _ = Inspect(command)
+	return
+}
+
+// Inspect parses once for screening, assessment, and policy evaluation.
+func Inspect(command string) (decision, reason string, facts, categories []string) {
 	if len(command) > MaxCommand || strings.TrimSpace(command) == "" {
-		return "invalid", "command must contain text and be at most 4096 bytes", nil
+		return "invalid", "command must contain text and be at most 4096 bytes", nil, nil
 	}
 	if !utf8.ValidString(command) || strings.ContainsFunc(command, func(r rune) bool {
 		return r != '\t' && r != '\n' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r))
 	}) {
-		return "invalid", "command contains invalid UTF-8 or hidden control characters", nil
+		return "invalid", "command contains invalid UTF-8 or hidden control characters", nil, nil
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "proposal")
 	if err != nil {
-		return "invalid", "invalid Bash syntax", nil
+		return "invalid", "invalid Bash syntax", nil, nil
 	}
 	decision, reason = classify(command, file)
 	if decision == "review" {
 		facts = syntaxFacts(file)
 	}
-	return decision, reason, facts
+	return decision, reason, facts, categoriesFor(file, decision)
 }
 
-// Categories describe observable shell behavior. Unknown programs remain unclear.
-func Categories(command, decision string) []string {
-	if decision == "invalid" {
-		return nil
-	}
+// categoriesFor describes observable shell behavior. Unknown programs remain unclear.
+func categoriesFor(file *syntax.File, decision string) []string {
 	if decision == "auto_candidate" {
 		return []string{"read-only", "execution"}
-	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil {
-		return nil
 	}
 	categories := []string{"unclear"}
 	add := func(category string) {
@@ -55,15 +54,65 @@ func Categories(command, decision string) []string {
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch n := node.(type) {
+		case *syntax.Stmt:
+			if n.Background {
+				add("background-job")
+			}
+			if n.Coprocess {
+				add("coprocess")
+			}
+			if n.Negated {
+				add("negation")
+			}
 		case *syntax.CallExpr:
 			if len(n.Args) > 0 {
 				add("execution")
 			}
+		case *syntax.Assign:
+			add("assignment")
 		case *syntax.Redirect:
 			switch n.Op {
-			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.RdrOut, syntax.ClbOut, syntax.RdrAll:
 				add("write")
+				add("output-overwrite")
+			case syntax.AppOut, syntax.AppAll:
+				add("write")
+				add("output-append")
+			case syntax.RdrInOut:
+				add("write")
+				add("read-write-redirect")
+			case syntax.RdrIn:
+				add("file-input")
+			case syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
+				add("inline-input")
+			case syntax.DplIn, syntax.DplOut:
+				add("descriptor-redirect")
 			}
+		case *syntax.BinaryCmd:
+			switch n.Op {
+			case syntax.Pipe, syntax.PipeAll:
+				add("pipeline")
+			case syntax.AndStmt, syntax.OrStmt:
+				add("conditional-chain")
+			}
+		case *syntax.CmdSubst:
+			add("command-substitution")
+		case *syntax.ProcSubst:
+			add("process-substitution")
+		case *syntax.ParamExp:
+			add("parameter-expansion")
+		case *syntax.ArithmExp, *syntax.ArithmCmd:
+			add("arithmetic")
+		case *syntax.Subshell:
+			add("subshell")
+		case *syntax.Block:
+			add("command-group")
+		case *syntax.IfClause, *syntax.CaseClause:
+			add("branch")
+		case *syntax.ForClause, *syntax.WhileClause:
+			add("loop")
+		case *syntax.FuncDecl:
+			add("function-definition")
 		}
 		return true
 	})
