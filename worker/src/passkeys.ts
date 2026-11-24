@@ -146,22 +146,22 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return createHmac('sha256', key).update(payload).digest('hex');
   }
 
-  async signInOptions() {
+  async signInOptions(context = '') {
     if (!await this.#credential()) return null;
     const origin = passkeyOrigin(this.env)!;
     const options = await generateAuthenticationOptions({ rpID: origin.hostname, userVerification: 'required' });
     const payload = (Date.now() + lifetime) + '.' + options.challenge;
-    return { id: payload + '.' + await this.#signInSeal(payload), options };
+    return { id: payload + '.' + await this.#signInSeal(payload + context), options };
   }
 
-  async signIn(id: unknown, response: AuthenticationResponseJSON) {
+  async signIn(id: unknown, response: AuthenticationResponseJSON, context = '') {
     if (typeof id !== 'string' || !/^[0-9]{13}\.[A-Za-z0-9_-]{32,128}\.[a-f0-9]{64}$/u.test(id)) return null;
     const [deadline, challenge, seal] = id.split('.');
     const expires = Number(deadline);
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
     if (expires <= Date.now() || !credential || response?.id !== credential.id ||
-        !timingSafeEqual(Buffer.from(seal), Buffer.from(await this.#signInSeal(deadline + '.' + challenge)))) return null;
+        !timingSafeEqual(Buffer.from(seal), Buffer.from(await this.#signInSeal(deadline + '.' + challenge + context)))) return null;
     const verification = await verifyAuthenticationResponse({
       response, expectedChallenge: challenge, expectedOrigin: origin.origin,
       expectedRPID: origin.hostname, credential, requireUserVerification: true,
@@ -177,7 +177,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const recent = Object.fromEntries(Object.entries(used).filter(([, deadline]) => deadline > now));
       await tx.put('credential', { ...credential, counter: verification.authenticationInfo.newCounter });
       await tx.put('used-owner-challenges', { ...recent, [challenge]: expires });
-      await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
+      if (!context) await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
       return true;
     });
     return accepted ? token : null;
@@ -922,6 +922,10 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     }
     if (path === '/onboard' || path === '/review') {
       return new Response(approvalPage, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    if (path === '/webauthn.js') {
+      const library = browserBundle.split('\nconst title =', 1)[0];
+      return new Response(library, { headers: { ...headers, 'Content-Type': 'text/javascript; charset=utf-8' } });
     }
     if (path === '/browser.js') {
       return new Response(browserBundle, { headers: { ...headers, 'Content-Type': 'text/javascript; charset=utf-8' } });
