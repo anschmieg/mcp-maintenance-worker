@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  commandPrefix, enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  commandPrefix, enrollmentCommand, enrollmentMarker, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
@@ -41,7 +41,9 @@ const installCommand = hostInstallCommand(client.publicKey);
 const forcedLine = installCommand.split('\n').find(line => line.includes('restrict,command='));
 assert.match(forcedLine, /restrict,command=/);
 assert.ok(!installCommand.includes('PRIVATE KEY'));
-const actualForcedCommand = forcedLine.match(/command="((?:\\.|[^"])*)"/u)[1].replace(/\\(["\\])/gu, '$1');
+// OpenSSH dequotes backslashes only when they precede a double quote.
+const readForcedCommand = line => line.match(/command="((?:\\"|[^"])*)"/u)[1].replaceAll('\\"', '"');
+const actualForcedCommand = readForcedCommand(forcedLine);
 assert.equal(actualForcedCommand, forcedCommand);
 const fakeSudo = join(directory, 'fixture-sudo');
 const restartLog = join(directory, 'restarts');
@@ -53,7 +55,10 @@ writeFileSync(fakeSudo, '#!/bin/sh\n' +
 const fixtureForcedCommand = actualForcedCommand.replace('/usr/bin/sudo', fakeSudo);
 const dynamicLine = hostInstallCommand(client.publicKey, undefined, true).split('\n')
   .find(line => line.includes('restrict,command='));
-const dynamicGate = dynamicLine.match(/command="((?:\\.|[^"])*)"/u)[1].replace(/\\(["\\])/gu, '$1');
+const dynamicGate = readForcedCommand(dynamicLine);
+assert.equal(execFileSync('/bin/sh', ['-c', dynamicGate], {
+  env: { SSH_ORIGINAL_COMMAND: enrollmentCommand }, encoding: 'utf8',
+}).trim(), enrollmentMarker);
 
 for (const request of ['', enrollmentCommand + ' extra', enrollmentCommand + '; id', restartCommand + ' ssh.service', restartCommand + '; id']) {
   assert.throws(() => execFileSync('/bin/sh', ['-c', actualForcedCommand], {
