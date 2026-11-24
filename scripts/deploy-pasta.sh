@@ -46,3 +46,32 @@ node worker/node_modules/wrangler/bin/wrangler.js deploy --config experiments/ta
 # Reuse the saved file even when the operator has credentials set in the shell.
 env -u PASSKEY_SETUP_TOKEN -u MCP_BEARER_TOKEN -u PASSKEY_ORIGIN \
   node worker/node_modules/wrangler/bin/wrangler.js deploy --config worker/wrangler.jsonc --secrets-file "$secrets_file"
+
+# Exercise the public Worker's private service binding without running an SSH command.
+node --input-type=module - "$secrets_file" <<'JS'
+import { readFileSync } from 'node:fs';
+
+const { PASSKEY_ORIGIN, MCP_BEARER_TOKEN } = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+const url = new URL('/health/ssh-backend', PASSKEY_ORIGIN);
+for (let attempt = 1; attempt <= 5; attempt++) {
+  const response = await fetch(url, {
+    headers: { Authorization: 'Bearer ' + MCP_BEARER_TOKEN },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (response.ok) {
+    const { state } = await response.json();
+    if (state === 'connected') {
+      console.log('PaSTA SSH backend is connected to Tailscale.');
+      process.exit(0);
+    }
+    if (state === 'unconfigured' && process.env.PASTA_REQUIRE_CONNECTED !== '1') {
+      console.log('PaSTA SSH backend is reachable. Complete Tailscale setup to connect it.');
+      process.exit(0);
+    }
+    if (state !== 'unconfigured') throw new Error('Unexpected backend smoke check response.');
+  }
+  if (!response.ok && response.status !== 503) throw new Error('Backend smoke check returned HTTP ' + response.status);
+  if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 2_000));
+}
+throw new Error('PaSTA SSH backend is not connected. Check the Tailscale setup page.');
+JS

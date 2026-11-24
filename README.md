@@ -44,7 +44,7 @@ The Worker sends only commands classified as `review` to the Cloudflare Workers 
 
 The default public Worker is named `pasta` and uses `pasta.<account-subdomain>.workers.dev`. You can also configure a dedicated HTTPS route. Preview URLs are disabled. The screening tool is a dry run. Configure the Portal upstream with its documented `bearer` authentication mode. Test direct access first, then try the same two examples through OpenBot and the Portal. Do not remove endpoint authentication if the Portal fails to connect or relay the form.
 
-For a fresh Cloudflare deployment, set `PASTA_WORKERS_SUBDOMAIN` to your account’s Workers subdomain and run `bash scripts/deploy-pasta.sh`. The deploy command builds both Workers, generates the setup code and MCP credential if they were omitted, and shows the setup link and owner-only file that holds the code. A fresh deployment may take the credentials from `PASSKEY_SETUP_TOKEN` and `MCP_BEARER_TOKEN` instead. Set `PASSKEY_ORIGIN` when you configure a custom route. The script reuses the saved configuration on redeploy.
+For a fresh Cloudflare deployment, set `PASTA_WORKERS_SUBDOMAIN` to your account’s Workers subdomain and run `bash scripts/deploy-pasta.sh`. The deploy command builds both Workers, generates the setup code and MCP credential if they were omitted, and shows the setup link and owner-only file that holds the code. A fresh deployment may take the credentials from `PASSKEY_SETUP_TOKEN` and `MCP_BEARER_TOKEN` instead. Set `PASSKEY_ORIGIN` when you configure a custom route. The script reuses the saved configuration on redeploy. It deploys the private SSH backend before the public Worker and verifies the service binding. Set `PASTA_REQUIRE_CONNECTED=1` when releasing to an already enrolled production deployment to require a live Tailscale connection.
 
 ## Runtime configuration
 
@@ -129,7 +129,7 @@ Add the following service binding to the maintenance Worker's deployment config:
   "services": [
     {
       "binding": "HOST_PROBE",
-      "service": "pasta-tailnet-ssh-probe",
+      "service": "pasta-ssh-backend",
       "entrypoint": "HostVerifier"
     }
   ]

@@ -113,6 +113,16 @@ export default {
       if (!await crypto.subtle.verify('HMAC',key,await crypto.subtle.sign('HMAC',clientKey,challenge),challenge)) return oauthUnauthorized(env);
     }
     if (request.headers.has('Origin')) return new Response('Browser origin not allowed',{status:403});
+    if (request.method === 'GET' && path === '/health/ssh-backend') {
+      const status = await env.HOST_PROBE?.prepareEnrollment().catch(() => null);
+      const state = status?.state === 'connected' || status?.state === 'unconfigured'
+        ? status.state
+        : 'unavailable';
+      return Response.json({ state }, {
+        status: state === 'unavailable' ? 503 : 200,
+        headers: { 'Cache-Control': 'no-store' },
+      });
+    }
     const length=request.headers.get('Content-Length');
     if (request.body && (!length || !/^\d{1,10}$/.test(length) || Number(length)>32768)) return new Response('A bounded request body is required',{status:413});
     // Do not pass the ingress access secret into the session object.
