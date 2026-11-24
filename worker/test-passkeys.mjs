@@ -21,8 +21,8 @@ async function post(path, body, requestOrigin = origin) {
   });
 }
 
-async function call(name, job_id, host, command, statement, statementToken, headers = {}) {
-  const client = new Client({ name: 'passkey-integration-test', version: '1' });
+async function call(name, job_id, host, command, statement, statementToken, headers = {}, clientName = 'passkey-integration-test') {
+  const client = new Client({ name: clientName, version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
       requestInit: { headers: { ...headers, Authorization: 'Bearer ' + (statementToken ?? mcpToken) } },
@@ -220,6 +220,11 @@ const connection = await call('maintenance_connection', undefined, undefined, un
 assert.equal(connection.connection_id, transaction);
 const namedInventory = await (await cookieRequest('standing-rules', {})).json();
 assert.equal(namedInventory.clients.find(client => client.id === transaction).reportedName, 'passkey-integration-test');
+
+assert.equal((await call('maintenance_connection', undefined, undefined, undefined, undefined, renewedToken, {}, 'other-agent')).connection_id, transaction);
+const renamed = (await (await cookieRequest('standing-rules', {})).json()).clients.find(client => client.id === transaction);
+assert.deepEqual(renamed.reportedNames, ['other-agent', 'passkey-integration-test']);
+await call('maintenance_connection', undefined, undefined, undefined, undefined, renewedToken);
 
 const secondAuthorize = await fetch(issuer.authorization_endpoint + '?' + params);
 assert.equal(secondAuthorize.status, 200);
@@ -733,7 +738,7 @@ const previewPolicy = async (input = previewInput) => {
 };
 assert.equal((await post('preview-standing-rules', previewInput)).status, 403);
 const beforePreview = await attempts();
-assert.deepEqual(await previewPolicy(), { decision: 'allow', matches: [group.id] });
+assert.deepEqual(await previewPolicy(), { decision: 'allow', matches: [group.id], categories: ['read-only', 'execution'] });
 assert.equal((await previewPolicy({ ...previewInput, command: 'uptime |' })).error, 'PaSTA rejected the command syntax.');
 assert.equal(await attempts(), beforePreview);
 assert.equal((await post('add-standing-rule', denyPolicy)).status, 403);
@@ -744,6 +749,31 @@ assert.equal((await cookieRequest('add-standing-rule', denyPolicy)).status, 200)
 const deniedPreview = await previewPolicy();
 assert.equal(deniedPreview.decision, 'deny');
 assert.equal(deniedPreview.matches.length, 3);
+assert.equal(await attempts(), beforePreview);
+const writePolicy = { ...members, command: 'deny', matcher: { kind: 'semantic', text: 'write' } };
+assert.equal((await cookieRequest('add-standing-rule', writePolicy)).status, 200);
+for (const command of ['echo ok > example', 'printf ok >> example']) {
+  const evaluation = await previewPolicy({ ...previewInput, command });
+  assert.equal(evaluation.decision, 'deny');
+  assert.ok(evaluation.categories.includes('write'));
+}
+assert.equal((await previewPolicy({ ...previewInput, command: 'cat < example' })).decision, 'require-approval');
+assert.equal((await standingRequest(randomUUID(), address, 'echo ok > example', secondToken)).state, 'denied_by_policy');
+assert.deepEqual((await previewPolicy({ ...previewInput, command: '  uptime  ' })).categories, ['read-only', 'execution']);
+const denyId = deniedPreview.matches[0];
+const askId = deniedPreview.matches[1];
+const moveFirst = async id => {
+  const { rules } = await (await cookieRequest('standing-rules', {})).json();
+  const index = rules.findIndex(rule => rule.id === id);
+  assert.ok(index > 0);
+  for (let step = 0; step < index; step++) {
+    assert.equal((await cookieRequest('move-standing-rule', { id, direction: -1 })).status, 200);
+  }
+};
+await moveFirst(askId);
+assert.equal((await previewPolicy()).decision, 'require-approval');
+await moveFirst(denyId);
+assert.equal((await previewPolicy()).decision, 'deny');
 assert.equal(await attempts(), beforePreview);
 const beforeDeny = await attempts();
 const denied = await standingRequest(randomUUID(), address, 'uptime', secondToken);

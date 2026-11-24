@@ -23,12 +23,13 @@ const prefix = '/passkeys';
 const empty = { executed: false };
 const standingCommands = ['uptime', 'df -h /srv/techleaddocker'] as const;
 type StandingCommand = typeof standingCommands[number];
-type McpConnection = { id: string; name: string; reportedName?: string; callback: string; connectedAt: number; expires: number };
+type McpConnection = { id: string; name: string; reportedName?: string; reportedNames?: string[]; callback: string; connectedAt: number; expires: number };
 type StandingScope = StandingCommand | 'read-only' | 'require-approval' | 'deny';
-type CommandMatch = { kind: 'exact' | 'prefix'; text: string };
+const semanticCategories = ['read-only', 'write', 'execution', 'unclear'];
+type CommandMatch = { kind: 'exact' | 'prefix' | 'semantic'; text: string };
 type RuleHost = { address: string; enrollment: string };
 type StandingRule = {
-  id: string; grants: string[]; targets: RuleHost[]; command: StandingScope; approvedCommands?: readonly StandingCommand[]; matcher?: CommandMatch;
+  id: string; priority?: number; grants: string[]; targets: RuleHost[]; command: StandingScope; approvedCommands?: readonly StandingCommand[]; matcher?: CommandMatch;
 };
 type StoredRule = StandingRule | ({ id: string; grant: string; command: StandingCommand } & RuleHost);
 
@@ -36,6 +37,12 @@ function expandRule(rule: StoredRule): StandingRule {
   if ('grants' in rule) return rule;
   const { id, grant, address, enrollment, command } = rule;
   return { id, grants: [grant], targets: [{ address, enrollment }], command };
+}
+
+function orderedRules(rules: Iterable<StoredRule>) {
+  const legacyPriority = (rule: StandingRule) => rule.command === 'deny' ? 0 : rule.command === 'require-approval' ? 1 : 2;
+  return [...rules].map(expandRule).sort((a, b) =>
+    (a.priority ?? legacyPriority(a)) - (b.priority ?? legacyPriority(b)) || a.id.localeCompare(b.id));
 }
 
 function selection(value: unknown, valid: (item: string) => boolean) {
@@ -668,23 +675,25 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return this.start(jobId, true, address, command === commandRestart, command, statement, parser, grant);
   }
 
-  async #evaluateRules(tx: DurableObjectStorage | DurableObjectTransaction, command: string, grant: string, host: Host, canUseRule: boolean) {
-    const applicable = [...(await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values()].map(expandRule).filter(rule =>
+  async #evaluateRules(tx: DurableObjectStorage | DurableObjectTransaction, command: string, grant: string, host: Host, canUseRule: boolean, categories: string[]) {
+    const applicable = orderedRules((await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values()).filter(rule =>
       rule.grants.includes(grant) && rule.targets.some(item => item.address === host.address && item.enrollment === host.enrollmentId));
-    const matches = ({ matcher }: StandingRule) => matcher &&
-      (matcher.kind === 'exact' ? command === matcher.text : command.startsWith(matcher.text));
-    const denied = applicable.filter(rule => rule.command === 'deny' && matches(rule));
-    const review = applicable.filter(rule => rule.command === 'require-approval' && matches(rule));
-    const standing = canUseRule ? applicable.filter(rule =>
-      rule.command === command || rule.approvedCommands?.some(approved => approved === command)) : [];
+    const matches = applicable.filter(rule => {
+      const { matcher } = rule;
+      if (!matcher) return canUseRule &&
+        (rule.command === command || rule.approvedCommands?.some(approved => approved === command));
+      if (matcher.kind === 'semantic') return categories.includes(matcher.text);
+      return matcher.kind === 'exact' ? command === matcher.text : command.startsWith(matcher.text);
+    });
+    const first = matches[0];
     const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, host.account ?? legacyAccount, command]));
-    const allows = !denied.length && !review.length && standing.length > 0 &&
+    const allows = first && !first.matcher &&
       !await tx.get('removing-host:' + host.address) &&
       sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host) && !await tx.get(retryLock);
     return {
-      decision: denied.length ? 'deny' : allows ? 'allow' : 'require-approval',
-      matches: [...denied, ...review, ...standing].map(({ id }) => id),
-      standingRule: allows ? standing[0].id : undefined,
+      decision: first?.command === 'deny' ? 'deny' : allows ? 'allow' : 'require-approval',
+      matches: matches.map(({ id }) => id),
+      standingRule: allows ? first.id : undefined,
       retryLock,
     };
   }
@@ -702,8 +711,8 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       if (!client || client.expires <= Date.now() || !host?.enrollmentId || !host.signedApproval ||
           !host.commandExecution || await tx.get('removing-host:' + address)) return { error: 'Select an authorized client and a ready host.' };
       const { decision, matches } = await this.#evaluateRules(tx, command, grant, host,
-        parser.decision === 'auto_candidate' && standingCommand(command));
-      return { decision, matches };
+        parser.decision === 'auto_candidate' && standingCommand(command), parser.categories);
+      return { decision, matches, categories: parser.categories };
     });
   }
 
@@ -760,7 +769,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
           Boolean(existing.target.commandExecution) === Boolean(target.commandExecution) &&
           Boolean(existing.target.signedApproval) === Boolean(target.signedApproval)));
       const policy = command && grant && host?.enrollmentId
-        ? await this.#evaluateRules(tx, command, grant, host, Boolean(canUseRule)) : undefined;
+        ? await this.#evaluateRules(tx, command, grant, host, Boolean(canUseRule), parser?.categories ?? []) : undefined;
       if (policy?.decision === 'deny') return 'denied';
       const job: Job = { target, options, ...(command ? { command, statement, hostName, scope } : {}),
         expires_at: Date.now() + this.#jobLifetime() };
@@ -883,7 +892,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const key = 'mcp-connection:' + connection.id;
     await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<McpConnection>(key);
-      await tx.put<McpConnection>(key, { ...connection, reportedName: current?.reportedName });
+      await tx.put<McpConnection>(key, { ...connection, reportedName: current?.reportedName, reportedNames: current?.reportedNames });
     });
   }
 
@@ -892,7 +901,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<McpConnection>(key);
       if (current && current.expires > Date.now() && current.reportedName !== reportedName) {
-        await tx.put<McpConnection>(key, { ...current, reportedName });
+        const reportedNames = [...new Set([reportedName, current.reportedName, ...(current.reportedNames ?? [])])]
+          .filter((name): name is string => Boolean(name)).slice(0, 12);
+        await tx.put<McpConnection>(key, { ...current, reportedName, reportedNames });
       }
     });
   }
@@ -922,9 +933,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const clients = [...connections.values()].sort((a, b) => b.connectedAt - a.connectedAt)
       .map(connection => ({ ...connection, active: connection.expires > now }));
     return {
-      clients, hosts, commands: ['require-approval', 'deny', 'read-only', ...standingCommands],
+      clients, hosts, semanticCategories, commands: ['require-approval', 'deny', 'read-only', ...standingCommands],
       sharedBearerConfigured: (this.env.MCP_BEARER_TOKEN?.length ?? 0) >= 32,
-      rules: [...rules.values()].map(expandRule).map(({ id, grants, targets, command, approvedCommands, matcher }) => {
+      rules: orderedRules(rules.values()).map(({ id, grants, targets, command, approvedCommands, matcher }) => {
         const clientIds = grants.filter(grant => (connections.get('mcp-connection:' + grant)?.expires ?? 0) > now);
         const hostAddresses = targets.filter(({ address, enrollment }) =>
           eligibleHosts.has(address) && byAddress.get(address)?.enrollmentId === enrollment).map(host => host.address);
@@ -943,8 +954,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     let matcher: CommandMatch | undefined;
     if (restrictive) {
       const value = input as Partial<CommandMatch> | null | undefined;
-      if ((value?.kind !== 'exact' && value?.kind !== 'prefix') ||
+      if ((value?.kind !== 'exact' && value?.kind !== 'prefix' && value?.kind !== 'semantic') ||
           typeof value.text !== 'string' || !value.text.trim() || new TextEncoder().encode(value.text).length > 4096) return false;
+      if (value.kind === 'semantic' && !semanticCategories.includes(value.text)) return false;
       matcher = { kind: value.kind, text: value.text };
     }
     const grants = selection(grant, item => validGrant.test(item));
@@ -973,9 +985,25 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         rule.targets.length === targets.length && targets.every(target => rule.targets.some(item =>
           item.address === target.address && item.enrollment === target.enrollment)));
       if (duplicate) return id === undefined;
+      const priority = existing.has('standing-rule:' + ruleId) ? expandRule(existing.get('standing-rule:' + ruleId)!).priority :
+          [...existing.values()].some(rule => expandRule(rule).priority !== undefined)
+            ? Math.max(...orderedRules(existing.values()).map(rule => rule.priority ?? 2)) + 1 : undefined;
       await tx.put<StandingRule>('standing-rule:' + ruleId, {
-        id: ruleId, grants, targets, command, ...(matcher ? { matcher } : {}), ...(command === 'read-only' ? { approvedCommands: standingCommands } : {}),
+        id: ruleId, grants, targets, command, ...(priority === undefined ? {} : { priority }), ...(matcher ? { matcher } : {}), ...(command === 'read-only' ? { approvedCommands: standingCommands } : {}),
       });
+      return true;
+    });
+  }
+
+  async moveStandingRule(token: unknown, id: unknown, direction: unknown) {
+    if (!await this.#ownerAuthorized(token) || typeof id !== 'string' || (direction !== -1 && direction !== 1)) return false;
+    return this.ctx.storage.transaction(async tx => {
+      const rules = orderedRules((await tx.list<StoredRule>({ prefix: 'standing-rule:' })).values());
+      const index = rules.findIndex(rule => rule.id === id);
+      const next = index + direction;
+      if (index < 0 || next < 0 || next >= rules.length) return false;
+      [rules[index], rules[next]] = [rules[next], rules[index]];
+      await tx.put(Object.fromEntries(rules.map((rule, priority) => ['standing-rule:' + rule.id, { ...rule, priority: priority + 3 }])));
       return true;
     });
   }
@@ -1202,6 +1230,9 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   if (path === '/add-standing-rule') {
     return await store.saveStandingRule(sessionCookie, body.grants ?? body.grant, body.addresses ?? body.address, body.command, body.id, body.matcher)
       ? reply({ saved: true }) : reject(403);
+  }
+  if (path === '/move-standing-rule') {
+    return await store.moveStandingRule(sessionCookie, body.id, body.direction) ? reply({ moved: true }) : reject(403);
   }
   if (path === '/remove-standing-rule') {
     return await store.removeStandingRule(sessionCookie, body.id) ? reply({ removed: true }) : reject(403);

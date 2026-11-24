@@ -39,7 +39,7 @@
       <p class="admin-empty" id="rules-empty">No rules yet.</p>
       <div class="admin-table-wrap" id="rules-table" hidden>
         <table aria-labelledby="rule-heading">
-          <thead><tr><th scope="col">MCP clients</th><th scope="col">SSH hosts</th><th scope="col">Command match</th><th scope="col">Decision</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
+          <thead><tr><th scope="col">Priority</th><th scope="col">MCP clients</th><th scope="col">SSH hosts</th><th scope="col">Command match</th><th scope="col">Decision</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
           <tbody id="standing-list"></tbody>
         </table>
       </div>
@@ -50,14 +50,15 @@
           <fieldset><legend>SSH hosts</legend><label>Search hosts <input type="search" id="filter-hosts"></label><p class="admin-selection" id="selected-hosts"></p><div class="admin-checkboxes" id="standing-host"></div></fieldset>
           <fieldset>
             <legend>Command match</legend>
-            <label>Condition <select id="standing-match-kind"><option value="exact">Command text is exactly</option><option value="prefix">Command text starts with</option><option value="preset">Supported diagnostic</option></select></label>
+            <label>Condition <select id="standing-match-kind"><option value="exact">Command text is exactly</option><option value="prefix">Command text starts with</option><option value="semantic">Parsed command category</option><option value="preset">Supported diagnostic</option></select></label>
             <label id="standing-matcher">Command text <textarea id="standing-match-text" rows="2" maxlength="4096"></textarea></label>
+            <label id="standing-category" hidden>Category <select id="standing-category-value"></select></label>
             <label id="standing-preset" hidden>Diagnostic <select id="standing-command"></select></label>
           </fieldset>
           <fieldset>
             <legend>Decision</legend>
             <label>When the rule matches <select id="standing-decision" required></select></label>
-            <p class="hint">Deny takes precedence, followed by Require approval, then Allow without approval.</p>
+            <p class="hint">PaSTA uses the first matching rule. Put an Always ask rule above the rules it should override.</p>
           </fieldset>
         </div>
         <p id="rule-preview" class="admin-preview"></p>

@@ -387,6 +387,9 @@ async function startAdmin() {
   const matchText = document.querySelector('#standing-match-text');
   const presetPanel = document.querySelector('#standing-preset');
   const decision = document.querySelector('#standing-decision');
+  const categoryPanel = document.querySelector('#standing-category');
+  const categorySelect = document.querySelector('#standing-category-value');
+  const categoryLabels = { 'read-only': 'Verified read-only', write: 'Shell writes to a file', execution: 'Invokes a command', unclear: 'Effects unclear' };
   const preview = document.querySelector('#rule-preview');
   const test = document.querySelector('#test-request');
   const testClient = document.querySelector('#test-client');
@@ -398,15 +401,19 @@ async function startAdmin() {
     { list: clientChoices, search: document.querySelector('#filter-clients'), summary: document.querySelector('#selected-clients') },
     { list: hostChoices, search: document.querySelector('#filter-hosts'), summary: document.querySelector('#selected-hosts') },
   ];
-  const decisions = { 'require-approval': 'Require approval', deny: 'Deny', allow: 'Allow without approval' };
+  const decisions = { 'require-approval': 'Always ask', deny: 'Always deny', allow: 'Always allow' };
 
   function updateMatcher(value = decision.value) {
     const preset = matchKind.value === 'preset';
-    matcherPanel.hidden = preset;
-    matchText.required = !preset;
+    const semantic = matchKind.value === 'semantic';
+    matcherPanel.hidden = preset || semantic;
+    matchText.required = !matcherPanel.hidden;
+    categoryPanel.hidden = !semantic;
+    categorySelect.required = semantic;
     presetPanel.hidden = !preset;
     commandSelect.required = preset;
     const choices = preset ? ['allow'] : ['require-approval', 'deny'];
+    if (semantic && categorySelect.value === 'read-only') choices.push('allow');
     options(decision, 'Select a decision', choices.map(key => [key, decisions[key]]));
     decision.value = choices.includes(value) ? value : choices[0];
     updatePreview();
@@ -502,29 +509,32 @@ async function startAdmin() {
       summary.textContent = labels.length ? labels.join(', ') : 'None selected';
       return labels.join(' or ');
     });
+    const semantic = matchKind.value === 'semantic';
     const condition = matchKind.value === 'preset'
       ? commandSelect.value && scopeLabel(commandSelect.value)
-      : matchText.value.trim() && (matchKind.value === 'exact' ? 'exactly matches ' : 'starts with ') + JSON.stringify(matchText.value);
+      : semantic ? categoryLabels[categorySelect.value] : matchText.value.trim() && (matchKind.value === 'exact' ? 'exactly matches ' : 'starts with ') + JSON.stringify(matchText.value);
     preview.textContent = selected.every(Boolean) && condition
       ? decisions[decision.value] + ' when ' + selected[0] + ' requests a command on ' + selected[1] +
-        (matchKind.value === 'preset' ? ' matching ' : ' whose text ') + condition + '.'
+        (matchKind.value === 'preset' || semantic ? ' matching ' : ' whose text ') + condition + '.'
       : 'Select clients, hosts, and a command match to preview this rule.';
   }
 
   form.addEventListener('input', updatePreview);
-  matchKind.onchange = () => updateMatcher();
+  matchKind.onchange = categorySelect.onchange = () => updateMatcher();
 
   function showEditor({ clientIds = [], hostAddresses = [], command, matcher, id } = {}) {
     editing = id;
     document.querySelector('#standing-form-title').textContent = id ? 'Edit rule' : 'Add rule';
     choose(clientChoices, clientIds);
     choose(hostChoices, hostAddresses);
-    const preset = Boolean(command && !matcher);
+    const readOnly = command === 'read-only';
+    const preset = Boolean(command && !matcher && !readOnly);
+    categorySelect.value = readOnly ? 'read-only' : matcher?.kind === 'semantic' ? matcher.text : '';
     commandSelect.value = preset ? command : '';
-    matchKind.value = preset ? 'preset' : matcher?.kind ?? 'exact';
+    matchKind.value = preset ? 'preset' : readOnly ? 'semantic' : matcher?.kind ?? 'semantic';
     for (const { search } of pickers) search.value = '';
     matchText.value = matcher?.text ?? '';
-    updateMatcher(preset ? 'allow' : command);
+    updateMatcher(preset || readOnly ? 'allow' : command);
     form.hidden = false;
     status.textContent = '';
     const next = !checked(clientChoices).length ? clientChoices.querySelector('input') :
@@ -545,7 +555,7 @@ async function startAdmin() {
   }
 
   async function loadDashboard() {
-    const { clients, hosts, rules, commands, sharedBearerConfigured } = await post('standing-rules', {});
+    const { clients, hosts, rules, commands, semanticCategories, sharedBearerConfigured } = await post('standing-rules', {});
     const activeClients = clients.filter(client => client.active);
     const eligibleHosts = hosts.filter(host => host.state === 'ready');
     const canAddRule = activeClients.length > 0 && eligibleHosts.length > 0;
@@ -558,6 +568,7 @@ async function startAdmin() {
     ]));
     options(commandSelect, 'Select a diagnostic', commands.filter(command => Object.hasOwn(diagnostics, command))
       .map(command => [command, scopeLabel(command)]));
+    options(categorySelect, 'Select a category', semanticCategories.map(category => [category, categoryLabels[category]]));
     options(testClient, 'Select a client', activeClients.map(client => [client.id, clientLabel(client)]));
     options(testHost, 'Select a host', eligibleHosts.map(host => [host.address, hostName(host)]));
     testPanel.hidden = !canAddRule;
@@ -568,7 +579,8 @@ async function startAdmin() {
       ? 'Pair a host with command access to create a rule.' : 'Connect an MCP client through OAuth to create a rule.';
     clientRows.replaceChildren();
     for (const client of clients) {
-      row(clientRows, identity(clientName(client), clientDetail(client)), pill(client.active ? 'Authorized' : 'Expired', client.active),
+      row(clientRows, identity(clientName(client), [clientDetail(client),
+        ...(client.reportedNames ?? []).filter(name => name !== clientName(client))].join(' · ')), pill(client.active ? 'Authorized' : 'Expired', client.active),
         client.active && canAddRule ? rowButton('Add rule', clientLabel(client), () => showEditor({ clientIds: [client.id] })) : null);
     }
     if (sharedBearerConfigured) {
@@ -603,6 +615,21 @@ async function startAdmin() {
       const controls = node('span', '', 'admin-actions');
       const label = clientNames.join(', ') + ' on ' + hostNames.join(', ') + ' · ' + rule.command;
       if (canAddRule) controls.append(rowButton('Edit', label, () => showEditor(rule)));
+      for (const [offset, title] of [[-1, 'Move up'], [1, 'Move down']]) {
+        if (index + offset < 0 || index + offset >= rules.length) continue;
+        controls.append(rowButton(title, label, async event => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          try {
+            await post('move-standing-rule', { id: rule.id, direction: offset });
+            await loadDashboard();
+            reviewStatus('success', 'Rule order saved.');
+          } catch {
+            button.disabled = false;
+            reviewStatus('error', 'Could not move the rule. Refresh and try again.');
+          }
+        }));
+      }
       controls.append(rowButton('Revoke', label, async event => {
         const button = event.currentTarget;
         button.disabled = true;
@@ -623,9 +650,10 @@ async function startAdmin() {
       };
       const fullyAvailable = rule.clientIds.length === rule.grants.length && rule.hostAddresses.length === rule.addresses.length;
       const commandMatch = rule.matcher
-        ? identity(rule.matcher.kind === 'exact' ? 'Exact text' : 'Starts with', rule.matcher.text)
+        ? rule.matcher.kind === 'semantic' ? categoryLabels[rule.matcher.text] :
+          identity(rule.matcher.kind === 'exact' ? 'Exact text' : 'Starts with', rule.matcher.text)
         : rule.approvedCommands ? identity('Supported read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
-      row(ruleRows, memberList(clientNames), memberList(hostNames), commandMatch,
+      row(ruleRows, String(index + 1), memberList(clientNames), memberList(hostNames), commandMatch,
         decisions[rule.matcher ? rule.command : 'allow'],
         pill(fullyAvailable ? 'Active' : rule.available ? 'Partial' : 'Unavailable', fullyAvailable), controls);
     }
@@ -645,14 +673,15 @@ async function startAdmin() {
     testResult.hidden = false;
     testResult.textContent = 'Evaluating…';
     try {
-      const { decision: result, matches, error } = await post('preview-standing-rules', {
+      const { decision: result, matches, categories, error } = await post('preview-standing-rules', {
         grant: testClient.value,
         address: testHost.value,
         command: document.querySelector('#test-command').value,
       });
       const rows = matches?.map(id => ruleNumbers.get(id)).filter(Boolean).sort((a, b) => a - b);
       testResult.textContent = error ?? (decisions[result] + '. ' +
-        (rows.length ? 'Matching table rows: ' + rows.join(', ') + '.' : 'No saved rules matched.'));
+        (rows.length ? 'Matching rules: ' + rows.join(', ') + '.' : 'No saved rules matched.') +
+        (categories.length ? ' Parsed as: ' + categories.map(category => categoryLabels[category]).join(', ') + '.' : ''));
     } catch {
       testResult.textContent = 'Could not evaluate the request. Refresh the dashboard and try again.';
     } finally {
@@ -674,8 +703,11 @@ async function startAdmin() {
     save.disabled = true;
     try {
       await post('add-standing-rule', {
-        grants, addresses, command: presetPanel.hidden ? decision.value : commandSelect.value, id: editing,
-        matcher: matcherPanel.hidden ? undefined : { kind: matchKind.value, text: matchText.value },
+        grants, addresses, command: decision.value === 'allow' ? (presetPanel.hidden ? 'read-only' : commandSelect.value) : decision.value,
+        id: editing,
+        matcher: decision.value === 'allow' ? undefined : {
+          kind: matchKind.value, text: categoryPanel.hidden ? matchText.value : categorySelect.value,
+        },
       });
       await loadDashboard();
       closeEditor();

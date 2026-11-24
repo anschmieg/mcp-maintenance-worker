@@ -35,6 +35,41 @@ func Analyze(command string) (decision, reason string, facts []string) {
 	return decision, reason, facts
 }
 
+// Categories describe observable shell behavior. Unknown programs remain unclear.
+func Categories(command, decision string) []string {
+	if decision == "invalid" {
+		return nil
+	}
+	if decision == "auto_candidate" {
+		return []string{"read-only", "execution"}
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	categories := []string{"unclear"}
+	add := func(category string) {
+		if !slices.Contains(categories, category) {
+			categories = append(categories, category)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.CallExpr:
+			if len(n.Args) > 0 {
+				add("execution")
+			}
+		case *syntax.Redirect:
+			switch n.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+				add("write")
+			}
+		}
+		return true
+	})
+	return categories
+}
+
 func classify(command string, file *syntax.File) (string, string) {
 	if len(file.Stmts) != 1 {
 		return "review", "expected one simple command"
