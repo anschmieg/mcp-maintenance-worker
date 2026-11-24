@@ -5,6 +5,10 @@ detect_host() {
     echo 'Run this command on the Linux host you want to enroll.' >&2
     return 1
   fi
+  if ! [ -t 0 ]; then
+    echo 'Run this command in an interactive terminal.' >&2
+    return 1
+  fi
   if ! command -v tailscale >/dev/null 2>&1 || ! address=$(tailscale ip -4 2>/dev/null) || [ -z "$address" ]; then
     echo 'Tailscale is not connected on this machine. Sign in to Tailscale here, then try again.' >&2
     return 1

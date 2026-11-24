@@ -1,32 +1,13 @@
 import { McpAgent } from 'agents/mcp';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import './wasm_exec.js';
-import module from './screen.wasm';
+import { classify } from './classify';
 import { assessCommand } from './assessment';
 import { TimingProbe } from './timing';
 import { approvalStore, passkeyOrigin, passkeyRoute, type PasskeyEnv } from './passkeys';
 export { TimingProbe };
 export { PasskeyApproval } from './passkeys';
-type Env = PasskeyEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe>; AI?: Parameters<typeof assessCommand>[0] };
-
-let ready: Promise<void> | undefined;
-const g = globalThis as typeof globalThis & {
-  Go: new () => { importObject: WebAssembly.Imports; run(wasm: WebAssembly.Instance): Promise<void> };
-  maintenanceScreen?: (command: string) => { decision: string; reason: string; syntax_facts: string[] };
-};
-async function classify(command: string) {
-  if (new TextEncoder().encode(command).length > 4096) return {decision:'invalid',reason:'command exceeds 4096 bytes',syntax_facts:[]};
-  ready ??= (async () => {
-    const go = new g.Go();
-    const wasm = await WebAssembly.instantiate(module, go.importObject);
-    void go.run(wasm).then(() => { g.maintenanceScreen = undefined; }).catch(() => { g.maintenanceScreen = undefined; });
-    if (!g.maintenanceScreen) throw new Error('Wasm parser did not initialize');
-  })();
-  await ready;
-  if (!g.maintenanceScreen) throw new Error('Wasm parser unavailable');
-  return g.maintenanceScreen(command);
-}
+type Env = PasskeyEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
 
 export class MaintenanceAgent extends McpAgent<Env> {
   server = new McpServer({name:'pasta',version:'0.6.0'});
@@ -43,13 +24,20 @@ export class MaintenanceAgent extends McpAgent<Env> {
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id)));
       this.server.registerTool('passkey_test_status', {
-        description: 'Read a passkey approval, enrollment check, or service restart by its original job UUID.',
+        description: 'Read the approval and execution result by its original job UUID.',
         inputSchema: jobSchema,
       }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
       this.server.registerTool('start_host_enrollment', {
         description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. Show the owner the review URL.',
         inputSchema: { ...jobSchema, host: z.string().optional() },
       }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
+      this.server.registerTool('request_maintenance_command', {
+        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. Show the returned review URL to the owner.',
+        inputSchema: z.strictObject({ ...jobSchema, host: z.string(), command: z.string().max(4096),
+          statement: z.string().trim().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
+        }),
+      }, async ({ job_id, host, command, statement }) =>
+        result(await approvalStore(this.env).requestCommand(job_id, host, command, statement)));
       this.server.registerTool('request_service_restart', {
         description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. Show the owner the review URL.',
         inputSchema: z.strictObject({ ...jobSchema, host: z.string() }),

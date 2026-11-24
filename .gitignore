@@ -12,3 +12,4 @@
 /experiments/tailnet/.wrangler/
 /experiments/tailnet/.dev.vars*
 /experiments/tailnet/.env*
+/.wrangler/

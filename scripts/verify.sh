@@ -47,6 +47,8 @@ start_worker() {
 }
 
 start_worker
+node --experimental-strip-types test-assessment.mjs
+node --experimental-strip-types test-host-approval.mjs
 node test.mjs
 PROBE_SECONDS=5 node test-timing.mjs
 if ! node test-passkeys.mjs "$scratch/restart-test.json"; then cat "$scratch/worker.log" "$scratch/ssh.log"; exit 1; fi

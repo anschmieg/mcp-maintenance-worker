@@ -15,9 +15,70 @@ as_admin() {
   fi
 }
 
-# Both tools write the selection to stderr and draw the menu on stdout.
+# Dialog tools return a tag. Gum and fzf return the displayed label.
 terminal_menu() {
-  "$menu_tool" --title 'PaSTA / Pair a host' "$@" 3>&1 1>&2 2>&3
+  menu_prompt=$1
+  menu_default=$2
+  menu_height=$3
+  menu_width=$4
+  menu_rows=$5
+  shift 5
+  case "$menu_tool" in
+    whiptail|dialog)
+      "$menu_tool" --title 'PaSTA / Pair a host' --default-item "$menu_default" \
+        --menu "$menu_prompt" "$menu_height" "$menu_width" "$menu_rows" "$@" 3>&1 1>&2 2>&3
+      return
+      ;;
+  esac
+
+  # Put the safe default first in pickers that focus the first result.
+  labels=$(
+    other_labels=''
+    while [ "$#" -gt 0 ]; do
+      label=${2:-$1}
+      if [ "$1" = "$menu_default" ]; then
+        default_label=$label
+      else
+        other_labels="$other_labels
+$label"
+      fi
+      shift 2
+    done
+    printf '%s\n' "$default_label$other_labels"
+  )
+  case "$menu_tool" in
+    gum)
+      picked=$(printf '%s\n' "$labels" | gum filter --limit 1 --header "$menu_prompt") || return 1
+      ;;
+    fzf)
+      picked=$(printf '%s\n' "$labels" | FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= \
+        fzf --no-multi --no-sort --reverse --header "$menu_prompt") || return 1
+      ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    if [ "$picked" = "${2:-$1}" ]; then
+      printf '%s\n' "$1"
+      return 0
+    fi
+    shift 2
+  done
+  return 1
+}
+
+confirm_account() {
+  case "$menu_tool" in
+    whiptail|dialog)
+      "$menu_tool" --title 'PaSTA / Pair a host' --defaultno --yesno "$1" 9 66 >&2
+      ;;
+    gum)
+      gum confirm --default=false "$1" >&2
+      ;;
+    *)
+      printf '  %s [y/N] ' "$1" >&3
+      IFS= read -r confirm || return 1
+      case "$confirm" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+      ;;
+  esac
 }
 
 login_accounts() {
@@ -45,9 +106,17 @@ choose_login() {
 $logins
 EOF
     fi
-    choice=$(terminal_menu --default-item + --menu 'Choose a login account' 20 68 11 "$@") || return 1
+    choice=$(terminal_menu 'Choose a login account' + 20 68 11 "$@") || return 1
     case "$choice" in
-      +) terminal_menu --inputbox 'Enter an existing login name' 9 60 ;;
+      +)
+        case "$menu_tool" in
+          whiptail|dialog)
+            "$menu_tool" --title 'PaSTA / Pair a host' --inputbox 'Enter an existing login name' 9 60 3>&1 1>&2 2>&3
+            ;;
+          gum) gum input --prompt 'Existing login name: ' ;;
+          fzf) read_login ;;
+        esac
+        ;;
       *) printf '%s\n' "$choice" ;;
     esac
     return
@@ -62,6 +131,10 @@ EOF
   else
     note 'No login accounts were listed. You can still enter a username.'
   fi
+  read_login
+}
+
+read_login() {
   printf '\n  Existing login name (Enter to go back): ' >&3
   IFS= read -r login && printf '%s\n' "$login"
 }
@@ -83,7 +156,7 @@ pair_host() {
     terminal_size=$(stty size 2>/dev/null) || terminal_size=''
     set -- $terminal_size
     if [ "$#" = 2 ] && [ "$1" -ge 22 ] && [ "$2" -ge 72 ]; then
-      for candidate in whiptail dialog; do
+      for candidate in gum whiptail dialog fzf; do
         if command -v "$candidate" >/dev/null && "$candidate" --version >/dev/null 2>&1; then
           menu_tool=$candidate
           break
@@ -106,15 +179,24 @@ pair_host() {
     note 'Connect to the selected machine and run the command there.'
     return 1
   fi
+  if [ "${command_execution:-no}" = yes ]; then
+    if [ ! -x /bin/bash ]; then
+      note 'Install Bash at /bin/bash before pairing this host for command execution.'
+      return 1
+    fi
+    note 'PaSTA can run approved Bash commands with the permissions of the selected account.'
+    note 'The PaSTA Worker holds the SSH key for this access. Choose a dedicated account with minimal permissions.'
+  fi
   while :; do
     if [ -n "$menu_tool" ]; then
-      answer=$(terminal_menu --default-item 4 --menu "Host: $target_name ($target_address)" 16 70 4 \
+      answer=$(terminal_menu "Host: $target_name ($target_address)" 1 16 70 4 \
         1 "Use the dedicated $account account (create if needed)" \
         2 'Use an existing login account' 3 'Show what setup installs' 4 'Cancel') || answer=4
     else
       printf '  %s1%s  Use the dedicated %s account (create if needed)\n' "$accent" "$reset" "$account" >&3
-      printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [4]: ' >&3
-      if ! IFS= read -r answer; then answer=''; fi
+      printf '  2  Use an existing login account\n  3  Show what setup installs\n  4  Cancel\n\n  Choice [1]: ' >&3
+      if ! IFS= read -r answer; then return 1; fi
+      answer=${answer:-1}
     fi
     case "$answer" in
       1)
@@ -142,28 +224,31 @@ pair_host() {
           note 'Choose an existing login with a nonzero user ID.'
           continue
         fi
-        if [ -n "$menu_tool" ]; then
-          "$menu_tool" --title 'PaSTA / Pair a host' --defaultno --yesno \
-            "Install the restricted PaSTA SSH key for $selected_account?" 9 66 >&2 || continue
-        else
-          printf '  Install the restricted PaSTA SSH key for %s? [y/N] ' "$selected_account" >&3
-          if ! IFS= read -r confirm; then continue; fi
-          case "$confirm" in y|Y|yes|YES) ;; *) continue ;; esac
-        fi
+        confirm_account "Install the restricted PaSTA SSH key for $selected_account?" || continue
         account="$selected_account"
         account_action=existing
         break
         ;;
       3)
         details='PaSTA installs one restricted SSH key for the account you choose.
-The key allows only the pairing check and the fixed maintenance operation.
-Maintenance needs passkey approval and uses the account’s existing sudo policy.
 PaSTA sends this machine’s SSH fingerprint to the Worker and checks the restricted SSH connection.'
-        if [ -n "$menu_tool" ]; then
-          "$menu_tool" --title 'PaSTA / What setup installs' --msgbox "$details" 14 68 >&2
+        if [ "${command_execution:-no}" = yes ]; then
+          details="$details
+The Worker holds the key, which can run Bash commands with this account’s permissions.
+The Worker requires passkey approval before it sends a command."
         else
-          printf '\n%s\n\n' "$details" >&3
+          details="$details
+This key only allows the pairing check and fixed service restart."
         fi
+        case "$menu_tool" in
+          whiptail|dialog)
+            "$menu_tool" --title 'PaSTA / What setup installs' --msgbox "$details" 14 68 >&2
+            ;;
+          gum|fzf)
+            terminal_menu "$details" back 14 68 1 back 'Back to setup' >/dev/null || :
+            ;;
+          *) printf '\n%s\n\n' "$details" >&3 ;;
+        esac
         ;;
       ''|4)
         if notify_worker --data-urlencode 'account_action=canceled'; then
@@ -191,6 +276,28 @@ PaSTA sends this machine’s SSH fingerprint to the Worker and checks the restri
     note 'Creating the dedicated account…'
     if ! as_admin useradd --system --create-home --home-dir /var/lib/"$account" --shell /bin/sh "$account"; then
       note 'Account creation failed. Check the error above, then rerun the command.'
+      return 1
+    fi
+  fi
+  if [ -n "${approval_gate:-}" ]; then
+    gate_dir="/var/lib/pasta-approval/$account"
+    if ! as_admin test -x /usr/bin/python3 || ! as_admin test -x /usr/bin/openssl ||
+       ! as_admin test -x /usr/sbin/visudo; then
+      note 'Command approval requires Python 3, OpenSSL and sudo.'
+      return 1
+    fi
+    if ! as_admin install -d -m 0755 /usr/local/libexec ||
+       ! as_admin install -d -m 0700 "$gate_dir" "$gate_dir/used" ||
+       ! printf '%s\n' "$approval_gate" | as_admin install -m 0644 /dev/stdin /usr/local/libexec/pasta-approval.py ||
+       ! printf '%s\n' "$approval_public_key" | as_admin install -m 0600 /dev/stdin "$gate_dir/public.pem" ||
+       ! printf '%s\n' "$approval_target" | as_admin install -m 0600 /dev/stdin "$gate_dir/target.json"; then
+      note 'Could not install the approval verifier.'
+      return 1
+    fi
+    sudo_rule="$account ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/local/libexec/pasta-approval.py"
+    if ! printf '%s\n' "$sudo_rule" | as_admin /usr/sbin/visudo -c -f - >/dev/null ||
+       ! printf '%s\n' "$sudo_rule" | as_admin install -m 0440 /dev/stdin "/etc/sudoers.d/pasta-approval-$(printf %s "$account" | tr . _)"; then
+      note 'Could not configure the approval verifier in sudo.'
       return 1
     fi
   fi

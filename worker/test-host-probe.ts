@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { connect } from 'cloudflare:sockets';
 import { sameEnrollmentHost, legacyAccount, type HostAccount, type Host } from '../experiments/tailnet/credentials';
-import { runEnrollmentCheck, runServiceRestart } from '../experiments/tailnet/ssh-check';
+import { runCommand, runEnrollmentCheck, runServiceRestart } from '../experiments/tailnet/ssh-check';
 
 export class HostVerifier extends WorkerEntrypoint {
   async configureTailnet(clientId: string, clientSecret: string) {
@@ -19,8 +19,8 @@ export class HostVerifier extends WorkerEntrypoint {
     return (await fetch('http://127.0.0.1:8796/prepare')).json();
   }
 
-  async prepareHostKey(address: string, account: HostAccount) {
-    return (await fetch('http://127.0.0.1:8796/install?address=' + encodeURIComponent(address) + '&account=' + encodeURIComponent(account))).json();
+  async prepareHostKey(address: string, account: HostAccount, commandExecution = false) {
+    return (await fetch('http://127.0.0.1:8796/install?address=' + encodeURIComponent(address) + '&account=' + encodeURIComponent(account) + '&dynamic=' + commandExecution)).json();
   }
 
   async saveEnrollmentHost(host: { address: string; fingerprint: string }) {
@@ -35,11 +35,15 @@ export class HostVerifier extends WorkerEntrypoint {
     return this.#runHostAction(expected, runEnrollmentCheck);
   }
 
+  async runApprovedCommand(expected: Host, command: string) {
+    return this.#runHostAction(expected, (socket, credentials) => runCommand(socket, credentials, command));
+  }
+
   async restartDemoService(expected: Host) {
     return this.#runHostAction(expected, runServiceRestart);
   }
 
-  async #runHostAction(expected: Host, execute: typeof runEnrollmentCheck | typeof runServiceRestart) {
+  async #runHostAction(expected: Host, execute: (...args: Parameters<typeof runEnrollmentCheck>) => Promise<unknown>) {
     const response = await fetch('http://127.0.0.1:8796/fixture?address=' + encodeURIComponent(expected.address));
     const { port, host, fingerprint, privateKey, interrupt } = await response.json();
     if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };

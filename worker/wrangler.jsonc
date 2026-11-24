@@ -6,8 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
-  "rules": [{"type": "Text", "globs": ["**/*.css", "**/pairing-install.sh", "**/pairing-detect.sh"], "fallthrough": true}],
-  "services": [{"binding": "HOST_PROBE", "service": "maintenance-tailnet-ssh-probe", "entrypoint": "HostVerifier"}],
+  "rules": [{"type": "Text", "globs": ["**/*.css", "**/pairing-install.sh", "**/pairing-detect.sh", "**/host-approval.py"], "fallthrough": true}],
+  "services": [{"binding": "HOST_PROBE", "service": "pasta-tailnet-ssh-probe", "entrypoint": "HostVerifier"}],
   "ai": {"binding": "AI"},
   "durable_objects": {"bindings":[{"name":"MCP_OBJECT","class_name":"MaintenanceAgent"},{"name":"PROBES","class_name":"TimingProbe"},{"name":"PASSKEYS","class_name":"PasskeyApproval"}]},
   "migrations":[{"tag":"v1","new_sqlite_classes":["MaintenanceAgent"]},{"tag":"v2","new_sqlite_classes":["TimingProbe"]},{"tag":"v3","new_sqlite_classes":["PasskeyApproval"]}]

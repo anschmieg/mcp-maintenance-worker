@@ -1,7 +1,10 @@
 import { TailnetObject, Tailnet } from './src/index.js';
-import { runEnrollmentCheck, runServiceRestart } from './ssh-check';
+import { runCommand, runEnrollmentCheck, runServiceRestart } from './ssh-check';
 import { generateSshKey, mintTaggedAuthKey, oauthConfigured, hostInstallCommand, validEnrollmentHost, sameEnrollmentHost, validTailnetIpv4, guidedTag, legacyAccount, isHostAccount, tailnetHostname, type HostAccount, type Host, type TailnetDevice } from './credentials';
 import { WorkerEntrypoint } from 'cloudflare:workers';
+
+const keySlot = (address: string, dynamic?: boolean) =>
+  (dynamic ? 'command-ssh-key:' : 'enrollment-ssh-key:') + address;
 
 type Key = Awaited<ReturnType<typeof generateSshKey>>;
 type GuidedJoin = { authKey?: string };
@@ -37,8 +40,8 @@ export class HostVerifier extends WorkerEntrypoint {
     return this.#node().configureTailnet(clientId, clientSecret);
   }
 
-  async prepareHostKey(address: string, account: HostAccount = legacyAccount) {
-    return this.#node().prepareHostKey(address, account);
+  async prepareHostKey(address: string, account: HostAccount = legacyAccount, commandExecution = false) {
+    return this.#node().prepareHostKey(address, account, commandExecution);
   }
 
   async saveEnrollmentHost(host: Host) {
@@ -51,6 +54,10 @@ export class HostVerifier extends WorkerEntrypoint {
 
   async runHostEnrollmentCheck(expected: Host) {
     return this.#node().runHostAction(expected, 'check');
+  }
+
+  async runApprovedCommand(expected: Host, command: string) {
+    return this.#node().runHostAction(expected, 'command', command);
   }
 
   async restartDemoService(expected: Host) {
@@ -158,21 +165,21 @@ export class ProbeNode extends TailnetObject {
     };
   }
 
-  async prepareHostKey(address: string, account: HostAccount = legacyAccount) {
+  async prepareHostKey(address: string, account: HostAccount = legacyAccount, commandExecution = false) {
     if (!validTailnetIpv4(address) || !isHostAccount(account)) return null;
-    const slot = 'enrollment-ssh-key:' + address;
+    const slot = keySlot(address, commandExecution);
     const existing = await this.ctx.storage.get<Key>(slot);
-    if (existing) return hostInstallCommand(existing.publicKey, account);
+    if (existing) return hostInstallCommand(existing.publicKey, account, commandExecution);
     const candidate = await generateSshKey();
     const key = await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Key>(slot);
       if (current) return current;
       const legacy = await tx.get<Host>('enrollment-host');
-      const selected = legacy?.address === address ? await tx.get<Key>('enrollment-ssh-key') ?? candidate : candidate;
+      const selected = !commandExecution && legacy?.address === address ? await tx.get<Key>('enrollment-ssh-key') ?? candidate : candidate;
       await tx.put(slot, selected);
       return selected;
     });
-    return hostInstallCommand(key.publicKey, account);
+    return hostInstallCommand(key.publicKey, account, commandExecution);
   }
 
   async saveEnrollmentHost(host: Host) {
@@ -182,7 +189,7 @@ export class ProbeNode extends TailnetObject {
       const current = await tx.get<Host>(slot);
       const legacy = await tx.get<Host>('enrollment-host');
       if (current || legacy?.address === host.address) return sameEnrollmentHost(current ?? legacy, host);
-      if (!await tx.get('enrollment-ssh-key:' + host.address)) return false;
+      if (!await tx.get(keySlot(host.address, host.commandExecution))) return false;
       await tx.put(slot, host);
       return true;
     });
@@ -196,7 +203,8 @@ export class ProbeNode extends TailnetObject {
       const current = await tx.get<Host>(slot) ?? (legacy?.address === expected.address ? legacy : undefined);
       if (current && !sameEnrollmentHost(current, expected)) return false;
       await tx.delete(slot);
-      await tx.delete('enrollment-ssh-key:' + expected.address);
+      await tx.delete(keySlot(expected.address));
+      await tx.delete(keySlot(expected.address, true));
       if (legacy?.address === expected.address) {
         await tx.delete('enrollment-host');
         await tx.delete('enrollment-ssh-key');
@@ -205,24 +213,27 @@ export class ProbeNode extends TailnetObject {
     });
   }
 
-  async runHostAction(expected: Host, operation: 'check' | 'restart') {
+  async runHostAction(expected: Host, operation: 'check' | 'restart' | 'command', command?: string) {
     const { host, key } = await this.ctx.storage.transaction(async tx => {
       const legacy = await tx.get<Host>('enrollment-host');
       const legacyHost = legacy?.address === expected.address ? legacy : undefined;
+      const host = await tx.get<Host>('enrollment-host:' + expected.address) ?? legacyHost;
       return {
-        host: await tx.get<Host>('enrollment-host:' + expected.address) ?? legacyHost,
-        key: await tx.get<Key>('enrollment-ssh-key:' + expected.address) ??
+        host,
+        key: await tx.get<Key>(keySlot(expected.address, host?.commandExecution)) ??
           (legacyHost ? await tx.get<Key>('enrollment-ssh-key') : undefined),
       };
     });
     if (!host || !key) return { state: 'unconfigured', executed: false };
     if (!sameEnrollmentHost(host, expected)) return { state: 'target_changed', executed: false };
+    if (operation === 'command' && (!host.commandExecution || !command)) return { state: 'unconfigured', executed: false };
     const tailnet = await this.#readyTailnet();
-    if (operation !== 'check' && operation !== 'restart') return { state: 'unconfigured', executed: false };
-    const execute = operation === 'restart' ? runServiceRestart : runEnrollmentCheck;
-    return execute(await tailnet.connect(host.address + ':22'), {
+    const socket = await tailnet.connect(host.address + ':22');
+    const credentials = {
       PROBE_SSH_KEY: key.privateKey, PROBE_HOST_FINGERPRINT: host.fingerprint, username: host.account ?? legacyAccount,
-    });
+    };
+    if (operation === 'command') return runCommand(socket, credentials, command!);
+    return (operation === 'restart' ? runServiceRestart : runEnrollmentCheck)(socket, credentials);
   }
 }
 

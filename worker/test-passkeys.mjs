@@ -12,19 +12,22 @@ let setupToken = bootstrapCode;
 const rpId = new URL(origin).hostname;
 
 async function post(path, body, requestOrigin = origin) {
+  if (['review-options', 'approve', 'job-status', 'reconcile'].includes(path) && !Object.hasOwn(body, 'token')) {
+    body = { ...body, token: setupToken };
+  }
   return fetch(origin + '/passkeys/' + path, {
     method: 'POST', headers: { Origin: requestOrigin, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 }
 
-async function call(name, job_id, host) {
+async function call(name, job_id, host, command, statement) {
   const client = new Client({ name: 'passkey-integration-test', version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
       requestInit: { headers: { Authorization: 'Bearer ' + mcpToken } },
     }), { timeout: 8000 });
-    const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}) } });
+    const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}), ...(command === undefined ? {} : { command, statement }) } });
     assert.ok(!result.isError, JSON.stringify(result));
     assert.ok([false, true, null].includes(result.structuredContent.executed));
     return result.structuredContent;
@@ -32,10 +35,19 @@ async function call(name, job_id, host) {
 }
 
 const fixture = 'http://127.0.0.1:8796';
+async function installApprovalFixture(script) {
+  const publicKey = script.match(/^approval_public_key='([^']+)'$/mu)?.[1];
+  const target = script.match(/^approval_target='([^']+)'$/mu)?.[1];
+  assert.ok(publicKey && target);
+  assert.equal((await fetch(fixture + '/approval-key', {
+    method: 'POST', body: JSON.stringify({ ...JSON.parse(target), publicKey }),
+  })).status, 200);
+}
 const attempts = async () => (await (await fetch(fixture + '/attempts')).json()).attempts;
 const receipt = process.argv[2];
 if (process.argv[3] === 'after-restart') {
-  const { hostJob, hostApproval, count } = JSON.parse(readFileSync(receipt, 'utf8'));
+  const { hostJob, hostApproval, count, ownerToken } = JSON.parse(readFileSync(receipt, 'utf8'));
+  setupToken = ownerToken;
   const status = await call('passkey_test_status', hostJob);
   assert.equal(status.state, 'check_outcome_unknown');
   assert.equal(status.executed, null);
@@ -94,7 +106,7 @@ assert.deepEqual(await (await post('setup-state', { token: setupToken })).json()
 assert.equal((await post('enroll', { token: setupToken, response: registration })).status, 403);
 assert.equal((await post('enrollment-options', { token: setupToken })).status, 403);
 assert.equal((await post('prepare-host', { token: bootstrapCode })).status, 403);
-assert.deepEqual(await (await post('owner-state', {})).json(), { enrolled: true });
+assert.deepEqual(await (await post('owner-state', {})).json(), { enrolled: true, pairingIdLength: 8, pairingTokenLength: 10 });
 const ownerSignIn = await (await post('sign-in-options', {})).json();
 const laterSignIn = await (await post('sign-in-options', {})).json();
 assert.notEqual(ownerSignIn.id, laterSignIn.id);
@@ -158,21 +170,27 @@ assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, i
 });
 const pair = await (await post('begin-host-pairing', { token: setupToken, address })).json();
 assert.equal(pair.account, 'pasta-mcp');
-assert.match(pair.installCommand, /^sh -c .*\[ -t 0 \].*curl -fsS -o "\$installer".* && sh "\$installer".*\/setup\?pair=/u);
+assert.match(pair.id, /^[A-Za-z0-9]{8}$/u);
+assert.match(pair.download.token, /^[A-Za-z0-9]{10}$/u);
+assert.equal(pair.installCommand, [
+  "curl -fsS '" + pair.download.url + "' -H 'Authorization: Bearer " +
+    pair.download.token + "' -o pasta-setup.sh &&",
+  'sh pasta-setup.sh',
+].join('\n'));
 execFileSync('/bin/sh', ['-n', '-c', pair.installCommand]);
-assert.equal(pair.installCommand.split('\n').length, 1);
 async function downloadPairingScript(pair, token = pair.download.token) {
   return fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + token } });
 }
 assert.equal((await fetch(pair.download.url)).status, 403);
 assert.equal((await downloadPairingScript(pair, mcpToken)).status, 403);
 const install = await (await downloadPairingScript(pair)).text();
+await installApprovalFixture(install);
 assert.match(install, /ssh-keygen.*ssh_host_ed25519_key.pub/u);
 assert.match(install, /account='pasta-mcp'/u);
 assert.match(install, /useradd --system --create-home/u);
 assert.match(install, /read -r answer;/u);
 assert.match(install, /Show what setup installs/u);
-assert.match(install, /Choice \[4\]/u);
+assert.match(install, /Choice \[1\]/u);
 assert.ok(install.includes('runuser -u "$account"'));
 assert.match(install, /tailscale ip -4/u);
 execFileSync('/bin/sh', ['-n', '-c', install]);
@@ -299,6 +317,7 @@ const alternatePair = await (await post('begin-host-pairing', { token: setupToke
 assert.notEqual(alternatePair.id, pair.id);
 const installedPublicKey = command => command.match(/ssh-ed25519 [A-Za-z0-9+/]+/u)[0];
 const alternateInstall = await (await downloadPairingScript(alternatePair)).text();
+await installApprovalFixture(alternateInstall);
 assert.notEqual(installedPublicKey(alternateInstall), installedPublicKey(install));
 const alternateToken = alternatePair.download.token;
 assert.equal((await hostCallback(alternateToken, hostPin, pair.id)).status, 403);
@@ -342,6 +361,7 @@ assert.deepEqual(await (await post('remove-host', { token: setupToken, address: 
   { state: 'removed' });
 const newPair = await (await post('begin-host-pairing', { token: setupToken, address: alternateAddress })).json();
 const newInstall = await (await downloadPairingScript(newPair)).text();
+await installApprovalFixture(newInstall);
 assert.notEqual(installedPublicKey(newInstall), installedPublicKey(alternateInstall));
 const newToken = newPair.download.token;
 assert.equal((await hostCallback(newToken, hostPin, newPair.id)).status, 200);
@@ -385,6 +405,15 @@ console.log('PASS: exact service restart uses one owner passkey, is target-bound
 
 await fetch(fixture + '/mode/automatic-discovery', { method: 'POST' });
 const detectedPair = await (await post('begin-host-pairing', { token: setupToken })).json();
+assert.match(detectedPair.id, /^[A-Za-z0-9]{8}$/u);
+assert.match(detectedPair.download.token, /^[A-Za-z0-9]{10}$/u);
+const previewResponse = await fetch(origin + '/passkeys/setup-preview');
+assert.equal(previewResponse.status, 200);
+const preview = await previewResponse.text();
+assert.match(preview, /detect_host\(\)/u);
+assert.ok(!preview.includes(detectedPair.download.token));
+assert.ok(!preview.includes(detectedPair.id));
+assert.doesNotMatch(preview, /^(?:pairing_token|claim_url)=/mu);
 const detection = await (await downloadPairingScript(detectedPair)).text();
 assert.match(detection, /tailscale ip -4/u);
 assert.doesNotMatch(detection, /ssh-ed25519/u);
@@ -399,6 +428,7 @@ const detectedAddress = '100.64.0.4';
 const claim = await claimHost(detectedAddress);
 assert.equal(claim.status, 200);
 const detectedInstaller = await claim.text();
+await installApprovalFixture(detectedInstaller);
 assert.match(detectedInstaller, /target_address='100\.64\.0\.4'/u);
 assert.match(detectedInstaller, /target_name='Auto host'/u);
 assert.match(detectedInstaller, /Use an existing login account/u);
@@ -458,6 +488,82 @@ assert.equal((await call('passkey_test_status', existingRestart)).state, 'servic
 assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, initialRestarts + 1);
 console.log('PASS: selected existing account is bound to SSH and a fresh one-time restart approval');
 
+const commandJob = randomUUID();
+const expectedOutput = 'pasta-dynamic-' + randomUUID();
+const command = "printf '%s' '" + expectedOutput + "'";
+const statement = 'Print a test message to prove that the flow works.';
+const namedRequest = await call('request_maintenance_command', randomUUID(), detectedAddress, command, statement);
+assert.equal(namedRequest.host_name, 'Auto host');
+assert.equal(namedRequest.host, detectedAddress);
+const beforeCommand = await attempts();
+const invalid = await call('request_maintenance_command', commandJob, address, command + ' |', statement);
+assert.equal(invalid.state, 'invalid_command');
+const commandRequest = await call('request_maintenance_command', commandJob, address, command, statement);
+assert.equal(commandRequest.state, 'pending');
+assert.equal(commandRequest.executed, false);
+assert.equal(await attempts(), beforeCommand);
+assert.equal((await call('start_host_enrollment', commandJob, address)).state, 'job_id_in_use');
+assert.equal((await call('request_maintenance_command', commandJob, address,
+  '/usr/bin/sudo -n -- /usr/bin/systemctl restart openbot-maintenance-demo.service', statement)).state, 'job_id_in_use');
+const commandReview = await (await post('review-options', { job: commandJob })).json();
+assert.equal(commandReview.job.command, command);
+assert.equal(commandReview.job.statement, statement);
+assert.equal(commandReview.job.explanation, 'Scope assessment unavailable. Review the command directly.');
+assert.equal((await call('request_maintenance_command', commandJob, address, command,
+  'A different reason.')).state, 'job_id_in_use');
+assert.equal(commandReview.job.host, address);
+const commandApproval = assertion(0x05, origin, commandReview.options.challenge);
+assert.equal((await post('approve', { job: commandJob, response: commandApproval })).status, 200);
+assert.equal((await post('approve', { job: commandJob, response: commandApproval })).status, 409);
+let commandResult = await call('passkey_test_status', commandJob);
+for (let retry = 0; commandResult.state === 'checking_host' && retry < 60; retry++) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+  commandResult = await call('passkey_test_status', commandJob);
+}
+assert.equal(commandResult.executed, true);
+assert.equal(commandResult.command, command);
+assert.equal(commandResult.state, 'command_completed');
+assert.equal(commandResult.stdout, expectedOutput);
+assert.equal(commandResult.exit_status, 0);
+for (const path of ['review-options', 'job-status', 'approve']) {
+  assert.equal((await post(path, { job: commandJob, token: null })).status, 403);
+}
+const publicResult = await (await post('job-status', { job: commandJob })).json();
+assert.equal(publicResult.state, 'command_completed');
+assert.equal(publicResult.stdout, undefined);
+assert.equal(publicResult.stderr, undefined);
+assert.equal(await attempts(), beforeCommand + 1);
+console.log('PASS: exact command shown in review, command substitution rejected, SSH executed once after approval');
+
+await fetch(fixture + '/mode/interrupted', { method: 'POST' });
+const uncertainJob = randomUUID();
+const retryJob = randomUUID();
+for (const id of [uncertainJob, retryJob]) {
+  assert.equal((await call('request_maintenance_command', id, address, command, statement)).state, 'pending');
+}
+async function approveJob(job) {
+  const { options } = await (await post('review-options', { job })).json();
+  return post('approve', { job, response: assertion(0x05, origin, options.challenge) });
+}
+assert.equal((await approveJob(uncertainJob)).status, 200);
+let uncertain;
+for (let attempt = 0; attempt < 100; attempt++) {
+  uncertain = await call('passkey_test_status', uncertainJob);
+  if (uncertain.state !== 'checking_host') break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal(uncertain.state, 'check_outcome_unknown');
+assert.equal((await approveJob(retryJob)).status, 409);
+assert.equal((await post('reconcile', { job: uncertainJob, token: null })).status, 403);
+assert.equal((await post('reconcile', { job: uncertainJob })).status, 200);
+await fetch(fixture + '/mode/normal', { method: 'POST' });
+assert.equal((await approveJob(retryJob)).status, 200);
+for (let attempt = 0; attempt < 60 && (await call('passkey_test_status', retryJob)).state === 'checking_host'; attempt++) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal((await call('passkey_test_status', retryJob)).state, 'command_completed');
+console.log('PASS: unknown command outcome requires owner reconciliation before a fresh approval');
+
 const count = await attempts() + 1;
 await fetch(fixture + '/mode/hang', { method: 'POST' });
 const hostJob = randomUUID();
@@ -470,4 +576,4 @@ for (let retry = 0; retry < 60 && await attempts() < count; retry++) {
 }
 assert.equal(await attempts(), count);
 assert.equal((await call('passkey_test_status', hostJob)).state, 'checking_host');
-writeFileSync(receipt, JSON.stringify({ hostJob, hostApproval, count }), { mode: 0o600 });
+writeFileSync(receipt, JSON.stringify({ ownerToken: setupToken, hostJob, hostApproval, count }), { mode: 0o600 });

@@ -1,5 +1,5 @@
 import { SshClient } from '@workeryard/undershell';
-import { enrollmentCommand, enrollmentMarker, restartCommand, restartMarker, type HostAccount } from './credentials';
+import { commandPrefix, enrollmentCommand, enrollmentMarker, restartCommand, restartMarker, type HostAccount } from './credentials';
 
 type SshSocket = Parameters<typeof SshClient.connect>[0]['socket'];
 type Credentials = { PROBE_SSH_KEY: string; PROBE_HOST_FINGERPRINT: string; username: HostAccount };
@@ -55,6 +55,23 @@ export async function runServiceRestart(socket: SshSocket, credentials: Credenti
       return { state: 'service_restarted', executed: true, exit_status: 0, stdout: restartMarker };
     }
     return { state: 'restart_failed', executed: null, exit_status: command.exitStatus };
+  });
+  if ('state' in result) return result;
+  return { state: result.hostKeyVerified ? 'ssh_authentication_failed' : 'host_key_unverified', executed: false };
+}
+
+export async function runCommand(socket: SshSocket, credentials: Credentials, command: string) {
+  const result = await withSsh(socket, credentials, async ssh => {
+    const response = await ssh.exec(commandPrefix + command, {
+      signal: AbortSignal.timeout(15000),
+      maxOutputBytes: 8192,
+    });
+    if (response.exitStatus == null) return { state: 'check_outcome_unknown', executed: null };
+    return {
+      state: response.exitStatus === 0 ? 'command_completed' : 'command_failed',
+      executed: true, exit_status: response.exitStatus,
+      stdout: response.stdout, stderr: response.stderr, truncated: response.truncated,
+    };
   });
   if ('state' in result) return result;
   return { state: result.hostKeyVerified ? 'ssh_authentication_failed' : 'host_key_unverified', executed: false };

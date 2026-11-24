@@ -80,16 +80,22 @@ export const enrollmentMarker = 'openbot-host-ready-v1';
 export const restartCommand = 'openbot-restart-demo-service-v1';
 export const restartUnit = 'openbot-maintenance-demo.service';
 export const restartMarker = 'openbot-service-restarted-v1';
-export const forcedCommand =
-  'case "$SSH_ORIGINAL_COMMAND" in ' +
+export const commandPrefix = 'pasta-exec-v2 ';
+const fixedCommands =
   enrollmentCommand + ') echo ' + enrollmentMarker + ';; ' +
   restartCommand + ') /usr/bin/sudo -n -- /usr/bin/systemctl restart ' + restartUnit +
-  ' && echo ' + restartMarker + ';; *) exit 126;; esac';
+  ' && echo ' + restartMarker + ';; ';
+const dynamicCommand = commandPrefix.trimEnd() + '\\ *) ' +
+  'printf "%s" "${SSH_ORIGINAL_COMMAND#' + commandPrefix +
+  '}" | /usr/bin/sudo -n -- /usr/bin/python3 -I /usr/local/libexec/pasta-approval.py;; ';
+const commandGate = (dynamic: boolean) => 'case "$SSH_ORIGINAL_COMMAND" in ' +
+  fixedCommands + (dynamic ? dynamicCommand : '') + '*) exit 126;; esac';
+export const forcedCommand = commandGate(false);
 
-export function hostInstallCommand(publicKey: string, account: HostAccount = maintenanceAccount) {
+export function hostInstallCommand(publicKey: string, account: HostAccount = maintenanceAccount, commandExecution = false) {
   if (!/^ssh-ed25519 [A-Za-z0-9+/]{68}$/u.test(publicKey)) throw new Error('Invalid enrollment public key');
   if (!isHostAccount(account)) throw new Error('Invalid maintenance account');
-  const escaped = forcedCommand.replace(/["\\]/gu, '\\$&');
+  const escaped = commandGate(commandExecution).replace(/["\\]/gu, '\\$&');
   const line = 'restrict,command="' + escaped + '" ' + publicKey + ' openbot-maintenance-enrollment';
   return [
     'test "$(id -un)" = "${1:-' + account + '}" && umask 077 && mkdir -p "$HOME/.ssh" &&',
@@ -99,7 +105,7 @@ export function hostInstallCommand(publicKey: string, account: HostAccount = mai
   ].join('\n');
 }
 
-export type Host = { address: string; fingerprint: string; enrollmentId?: string; account?: HostAccount };
+export type Host = { address: string; fingerprint: string; enrollmentId?: string; account?: HostAccount; commandExecution?: boolean; signedApproval?: boolean };
 
 export function validTailnetIpv4(address: string) {
   if (typeof address !== 'string') return false;
@@ -117,5 +123,7 @@ export function validEnrollmentHost(host: Host) {
 export function sameEnrollmentHost(current: Host | undefined, expected: Host) {
   return current?.address === expected.address && current.fingerprint === expected.fingerprint &&
     current.enrollmentId === expected.enrollmentId &&
+    Boolean(current.commandExecution) === Boolean(expected.commandExecution) &&
+    Boolean(current.signedApproval) === Boolean(expected.signedApproval) &&
     (current.account ?? legacyAccount) === (expected.account ?? legacyAccount);
 }

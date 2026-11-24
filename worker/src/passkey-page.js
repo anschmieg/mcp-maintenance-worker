@@ -24,6 +24,26 @@ async function post(path, body) {
   return response.json();
 }
 
+function reviewStatus(tone, message) {
+  status.dataset.tone = tone;
+  const svgNamespace = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(svgNamespace, 'svg');
+  icon.setAttribute('class', 'status-icon');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  const path = document.createElementNS(svgNamespace, 'path');
+  path.setAttribute('d', {
+    success: 'M4 12l5 5L20 6',
+    error: 'M12 8v5m0 3h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
+    warning: 'M12 6v6h4 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
+    pending: 'M5 12h.01m7 0h.01m7 0h.01',
+  }[tone]);
+  icon.append(path);
+  const text = document.createElement('span');
+  text.textContent = message;
+  status.replaceChildren(icon, text);
+}
+
 function bind(label, run, failure) {
   action.textContent = label;
   action.disabled = false;
@@ -33,8 +53,12 @@ function bind(label, run, failure) {
     try {
       await run();
     } catch {
-      status.textContent = failure;
-      action.disabled = false;
+      if (typeof failure === 'function') {
+        await failure();
+      } else {
+        status.textContent = failure;
+        action.disabled = false;
+      }
     }
   };
 }
@@ -199,15 +223,17 @@ function hostSetup(token) {
       panel.hidden = false;
       copy.textContent = 'Copy command';
       script.value = '';
+      delete script.dataset.loaded;
       script.parentElement.open = false;
       script.parentElement.ontoggle = async () => {
-        if (!script.parentElement.open || script.value) return;
+        if (!script.parentElement.open || script.dataset.loaded === 'true') return;
         try {
-          const response = await fetch(pair.download.url, { headers: { Authorization: 'Bearer ' + pair.download.token } });
+          const response = await fetch('/passkeys/setup-preview');
           if (!response.ok) throw new Error();
           script.value = await response.text();
+          script.dataset.loaded = 'true';
         } catch {
-          script.value = 'Could not load the script. Generate a fresh command and try again.';
+          script.value = 'Could not load the script preview. Close it and open it again to retry.';
         }
       };
       copy.onclick = async () => {
@@ -299,34 +325,137 @@ if (location.pathname.endsWith('/onboard')) {
   });
 } else {
   const job = new URLSearchParams(location.search).get('job');
-  post('review-options', { job }).then(({ options: optionsJSON, job: request }) => {
-    title.textContent = request.service ? 'Approve service restart'
+  let token;
+  const deadline = document.querySelector('#review-deadline');
+  const commandPanel = document.querySelector('#review-command');
+
+  function showCommand(request) {
+    if (!request.command) return;
+    title.textContent = 'Approve command';
+    details.textContent = '';
+    details.hidden = true;
+    const commandDisplay = document.querySelector('#command-display');
+    commandDisplay.querySelector('code').textContent = request.command;
+    commandDisplay.hidden = false;
+
+    const hostname = request.host_name?.replace(/\.[^.]+\.ts\.net\.?$/iu, '');
+    const target = commandPanel.querySelector('[data-review="host"]');
+    target.textContent = request.execution_identity + ' @ ' + (hostname || request.host);
+    target.title = hostname ? request.host_name + ' · ' + request.host : '';
+    const runAs = commandPanel.querySelector('[data-review="run-as"]');
+    runAs.hidden = !request.run_as;
+    runAs.textContent = request.run_as ? 'Runs as ' + request.run_as : '';
+    commandPanel.querySelector('[data-review="explanation"]').textContent = request.explanation;
+    const statement = commandPanel.querySelector('[data-review="statement"]');
+    statement.textContent = request.statement ?? '';
+    statement.parentElement.hidden = !request.statement;
+    commandPanel.hidden = false;
+  }
+
+  const results = {
+    verified_dry_run: ['success', 'Passkey approval verified for the dry run.'],
+    verified: ['success', 'Host enrollment verified.'],
+    service_restarted: ['success', 'Service restarted.'],
+    expired: ['warning', 'This request expired. Ask your agent for a new approval link.'],
+    checking_host: ['pending', 'Approval verified. The host operation is still running.'],
+    check_outcome_unknown: ['warning', 'The outcome is unknown. Check the host before retrying.'],
+    target_changed: ['error', 'The enrolled host changed. Ask your agent for a new approval request.'],
+    host_key_unverified: ['error', 'The SSH host key could not be verified.'],
+    ssh_authentication_failed: ['error', 'The host rejected the SSH login.'],
+    unconfigured: ['error', 'SSH access has not been configured for this host.'],
+    diagnostic_failed: ['error', 'The SSH diagnostic failed.'],
+    command_completed: ['success', 'Command completed successfully.'],
+    command_failed: ['error', 'The command exited with an error.'],
+    restart_failed: ['error', 'The service restart failed.'],
+    connection_failed: ['error', 'PaSTA could not connect to the host.'],
+    unknown: ['error', 'PaSTA could not find this request. Check the link with your agent.'],
+  };
+
+  function showResult(result) {
+    showCommand(result);
+    deadline.hidden = true;
+    action.hidden = true;
+    if (result.command && (result.state === 'verified' || result.state === 'service_restarted')) {
+      reviewStatus('success', 'Command completed successfully.');
+      return;
+    }
+    reviewStatus(...(results[result.state] ?? ['error', 'PaSTA could not read the result. Reload this page to check again.']));
+    if (result.can_reconcile) {
+      action.hidden = false;
+      bind('I checked the host. Allow a new request', async () => {
+        await post('reconcile', { job, token });
+        action.hidden = true;
+        reviewStatus('success', 'Host check recorded. A new request still needs passkey approval.');
+      }, 'PaSTA could not record the host check. Reload and try again.');
+    }
+  }
+
+  async function loadReview() {
+    let review;
+    try {
+      review = await post('review-options', { job, token });
+    } catch {
+      const result = await post('job-status', { job, token }).catch(() => null);
+      if (result && result.state !== 'pending') {
+        showResult(result);
+      } else {
+        reviewStatus('error', 'PaSTA could not load this request. Check the link or try again.');
+        bind('Retry', loadReview, 'PaSTA could not load this request.');
+      }
+      return;
+    }
+    const { options: optionsJSON, job: request } = review;
+    title.textContent = request.command && !request.service ? 'Approve SSH command'
+      : request.service ? 'Approve service restart'
       : request.dry_run ? 'Approve maintenance test' : 'Verify SSH enrollment';
-    details.textContent = request.service
+    details.textContent = request.command && !request.service
+      ? 'Run this Bash command once over SSH with the access of the account shown below.'
+      : request.service
       ? 'Restart ' + request.service + ' once on ' + request.host + ' as ' + request.run_as +
         ', using the SSH account ' + request.execution_identity + '. The service may be briefly unavailable.'
       : request.dry_run
       ? request.operation + ' on ' + request.host + ' as ' + request.execution_identity + '. This dry run will not connect to the host.'
-      : 'Ask your host administrator to install the restricted SSH key for ' + request.execution_identity + ' on ' +
-        request.host + ' first. This check verifies the pinned host key and runs openbot-enrollment-check-v1 once over SSH.';
+      : 'Verify the SSH host key and run a read-only diagnostic on ' + request.host + ' as ' + request.execution_identity + '.';
+
+    showCommand(request);
+    const expires = new Date(request.expires_at);
+    deadline.textContent = 'Approval deadline ' + new Intl.DateTimeFormat(undefined, {
+      dateStyle: 'medium', timeStyle: 'short',
+    }).format(expires);
+    deadline.hidden = false;
+    reviewStatus('pending', 'Waiting for your passkey approval.');
     bind(request.service ? 'Approve restart with passkey' : 'Approve with passkey', async () => {
       const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
-      const approved = await post('approve', { job, response });
-      if (request.dry_run) {
-        status.textContent = 'Approval verified. You can close this tab and return to your MCP client to check the result.';
-        return;
-      }
-      status.textContent = request.service ? 'Approval verified. Restarting the service…' : 'Approval verified. Checking SSH enrollment…';
-      let result = approved;
+      let result = await post('approve', { job, token, response });
+      action.hidden = true;
+      deadline.hidden = true;
       for (let attempt = 0; result.state === 'checking_host' && attempt < 30; attempt++) {
+        reviewStatus('pending', request.service ? 'Approval verified. Restarting the service…' : 'Approval verified. Checking SSH enrollment…');
         await new Promise(resolve => setTimeout(resolve, 1000));
-        result = await post('job-status', { job }).catch(() => result);
+        result = await post('job-status', { job, token }).catch(() => result);
       }
-      status.textContent = result.state === 'service_restarted' ? 'Service restarted.'
-        : result.state === 'verified' ? 'Host enrollment verified.'
-        : 'Host check status: ' + result.state + '. Check job ' + job + ' in your MCP client for the result.';
-    }, 'Approval did not complete. Retry or return to your MCP client if the request expired.');
-  }).catch(() => {
-    status.textContent = 'This request is unavailable, expired, or already approved.';
-  });
+      showResult(result);
+    }, async () => {
+      const result = await post('job-status', { job, token }).catch(() => null);
+      if (result && result.state !== 'pending') {
+        showResult(result);
+      } else {
+        reviewStatus('error', 'Passkey approval did not complete. Try again.');
+        action.disabled = false;
+      }
+    });
+  }
+
+  if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(job ?? '')) {
+    title.textContent = 'Open approval request';
+    details.textContent = 'Sign in with your passkey to view the request.';
+    bind('Sign in with passkey', async () => {
+      const { id, options: optionsJSON } = await post('sign-in-options', {});
+      const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
+      ({ token } = await post('sign-in', { id, response }));
+      await loadReview();
+    }, 'Sign-in did not complete. Try again.');
+  } else {
+    showResult({ state: 'unknown' });
+  }
 }

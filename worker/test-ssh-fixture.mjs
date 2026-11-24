@@ -1,15 +1,32 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
 import {
-  enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
+  commandPrefix, enrollmentCommand, isHostAccount, legacyAccount, restartCommand, restartUnit, forcedCommand, generateSshKey, hostInstallCommand, mintTaggedAuthKey, sameEnrollmentHost, validEnrollmentHost,
 } from '../experiments/tailnet/credentials.ts';
 
 const directory = process.argv[2];
+const approvalGate = fileURLToPath(new URL('../experiments/tailnet/host-approval.py', import.meta.url));
+const approvalKeys = new Map();
+const fixtureApproval = join(directory, 'fixture-approval.py');
+writeFileSync(fixtureApproval, `
+import os, re, runpy, sys
+key, used, enrollment, host, account = (os.environ[name] for name in
+    ("APPROVAL_KEY", "APPROVAL_USED", "APPROVAL_ENROLLMENT", "APPROVAL_HOST", "APPROVAL_ACCOUNT"))
+try:
+    consume = runpy.run_path(os.environ["APPROVAL_GATE"])["consume"]
+    command = consume(sys.stdin.read(24001), key, used, enrollment=enrollment, host=host, account=account)
+except (OSError, ValueError, KeyError):
+    sys.exit(126)
+if not re.fullmatch(r"printf '%s' 'pasta-dynamic-[a-f0-9-]+'(?:; exit 7)?", command):
+    sys.exit(126)
+os.execl("/bin/bash", "bash", "--noprofile", "--norc", "-c", command)
+`);
 function generate(name) {
   const key = join(directory, name);
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
@@ -34,6 +51,10 @@ writeFileSync(fakeSudo, '#!/bin/sh\n' +
   'test "$FIXTURE_MODE" != restart-denied || exit 1\n' +
   'echo restarted >> "$RESTART_LOG"\n', { mode: 0o700 });
 const fixtureForcedCommand = actualForcedCommand.replace('/usr/bin/sudo', fakeSudo);
+const dynamicLine = hostInstallCommand(client.publicKey, undefined, true).split('\n')
+  .find(line => line.includes('restrict,command='));
+const dynamicGate = dynamicLine.match(/command="((?:\\.|[^"])*)"/u)[1].replace(/\\(["\\])/gu, '$1');
+
 for (const request of ['', enrollmentCommand + ' extra', enrollmentCommand + '; id', restartCommand + ' ssh.service', restartCommand + '; id']) {
   assert.throws(() => execFileSync('/bin/sh', ['-c', actualForcedCommand], {
     env: { SSH_ORIGINAL_COMMAND: request },
@@ -73,6 +94,7 @@ let automaticDiscovery = false;
 
 const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
   connection.on('error', () => {});
+  let authenticatedAddress;
   connection.on('authentication', auth => {
     if (!isHostAccount(auth.username) || auth.method !== 'publickey') return auth.reject();
     const address = [...clientKeys].find(([, key]) =>
@@ -82,15 +104,31 @@ const ssh = new ssh2.Server({ hostKeys: [host.privateKey] }, connection => {
     if (auth.signature && clientPublic.verify(auth.blob, auth.signature, auth.hashAlgo) !== true) {
       return auth.reject();
     }
+    authenticatedAddress = address;
     auth.accept();
   });
   connection.on('session', accept => {
     accept().on('exec', (acceptCommand, _reject, info) => {
       attempts++;
       const stream = acceptCommand();
-      assert.ok([enrollmentCommand, restartCommand].includes(info.command));
-      const result = spawnSync('/bin/sh', ['-c', fixtureForcedCommand], {
-        env: { SSH_ORIGINAL_COMMAND: info.command, RESTART_LOG: restartLog, FIXTURE_MODE: mode },
+      const dynamic = info.command.startsWith(commandPrefix);
+      const target = enrolled.get(authenticatedAddress);
+      const key = approvalKeys.get(target?.enrollmentId);
+      if (dynamic && (!target?.signedApproval || !key)) {
+        stream.exit(126);
+        stream.end();
+        return;
+      }
+      const gate = dynamic
+        ? dynamicGate.replace('/usr/bin/sudo -n -- /usr/bin/python3 -I /usr/local/libexec/pasta-approval.py',
+          '/usr/bin/python3 -I ' + fixtureApproval)
+        : fixtureForcedCommand;
+      const result = spawnSync('/bin/sh', ['-c', gate], {
+        env: { SSH_ORIGINAL_COMMAND: info.command, RESTART_LOG: restartLog, FIXTURE_MODE: mode,
+          ...(dynamic ? { APPROVAL_KEY: key.publicKey, APPROVAL_USED: key.used,
+            APPROVAL_ENROLLMENT: target.enrollmentId, APPROVAL_HOST: target.address,
+            APPROVAL_ACCOUNT: target.account ?? legacyAccount, APPROVAL_GATE: approvalGate } : {}),
+        },
       });
       stream.write(mode === 'wrong-response' ? 'unexpected\n' : result.stdout);
       stream.exit(result.status);
@@ -104,10 +142,20 @@ createServer(async (request, response) => {
   const address = url.searchParams.get('address');
   const clientKey = clientKeys.get(address);
   const visible = automaticDiscovery ? [...devices, { name: 'Auto host', address: '100.64.0.4' }] : devices;
-  if (url.pathname === '/install') {
+  if (url.pathname === '/approval-key' && request.method === 'POST') {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const { enrollment, publicKey } = JSON.parse(body);
+    const path = join(directory, enrollment);
+    mkdirSync(path, { recursive: true });
+    const key = join(path, 'public.pem');
+    writeFileSync(key, publicKey);
+    approvalKeys.set(enrollment, { publicKey: key, used: path });
+    response.end('{}');
+  } else if (url.pathname === '/install') {
     const key = clientKey ?? await generateSshKey();
     clientKeys.set(address, key);
-    response.end(JSON.stringify(hostInstallCommand(key.publicKey, url.searchParams.get('account') ?? legacyAccount)));
+    response.end(JSON.stringify(hostInstallCommand(key.publicKey, url.searchParams.get('account') ?? legacyAccount, url.searchParams.get('dynamic') === 'true')));
   } else if (url.pathname === '/fixture') {
     const target = enrolled.get(address);
     const fingerprint = mode === 'wrong-pin' ? 'SHA256:' + 'A'.repeat(43) : target?.fingerprint;

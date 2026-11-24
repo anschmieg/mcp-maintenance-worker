@@ -1,5 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHostApprovalKey, signHostApproval } from './host-approval';
+import hostApprovalGate from '../../experiments/tailnet/host-approval.py';
+import { classify } from './classify';
+import { assessScope, scopeUnavailable, type DecisionModel } from './assessment';
+import { createHash, createHmac, randomInt, timingSafeEqual } from 'node:crypto';
 import {
   generateAuthenticationOptions, generateRegistrationOptions,
   verifyAuthenticationResponse, verifyRegistrationResponse,
@@ -10,48 +14,72 @@ import approvalPage from './passkey-page.html';
 import approvalStyles from './passkey-page.css';
 import pairingInstaller from './pairing-install.sh';
 import pairingDetector from './pairing-detect.sh';
-import { sameEnrollmentHost, isHostAccount, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
+import { sameEnrollmentHost, isHostAccount, enrollmentMarker, restartUnit, validEnrollmentHost, validTailnetIpv4, legacyAccount, maintenanceAccount, type HostAccount, type Host, type TailnetDevice } from '../../experiments/tailnet/credentials';
 
 const lifetime = 5 * 60_000;
+const approvalLifetime = 15 * 60_000;
 const prefix = '/passkeys';
 const empty = { executed: false };
 const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: maintenanceAccount, dry_run: true } as const;
 const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false } as const;
+const commandCheck = 'echo ' + enrollmentMarker;
+const commandRestart = '/usr/bin/sudo -n -- /usr/bin/systemctl restart ' + restartUnit;
 const restartOperation = 'restart ' + restartUnit;
-const isHostOperation = (operation: string) => operation === hostCheck.operation || operation === restartOperation;
+const commandOperation = 'run approved Bash command';
+const isHostOperation = (operation: string) => operation === hostCheck.operation || operation === restartOperation || operation === commandOperation;
 type HostVerification = 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed' | 'verified' | 'connection_failed';
 type HostResult =
+  | { state: 'command_completed' | 'command_failed'; executed: true; stdout: string; stderr: string; exit_status: number; truncated: boolean }
   | { state: 'verified' | 'service_restarted'; executed: true; stdout: string; exit_status: 0 }
   | { state: 'unconfigured' | 'target_changed' | 'host_key_unverified' | 'ssh_authentication_failed'; executed: false }
   | { state: 'diagnostic_failed' | 'restart_failed' | 'check_outcome_unknown'; executed: null; exit_status?: number | null };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 type Job = {
-  target: typeof diagnostic | (Omit<typeof hostCheck, 'host' | 'operation' | 'execution_identity'> & { host: string; fingerprint: string; enrollmentId?: string; operation: string; execution_identity: HostAccount });
+  target: typeof diagnostic | (Omit<typeof hostCheck, 'host' | 'operation' | 'execution_identity'> & { host: string; fingerprint: string; enrollmentId?: string; commandExecution?: boolean; signedApproval?: boolean; operation: string; execution_identity: HostAccount });
   options: Awaited<ReturnType<typeof generateAuthenticationOptions>>;
   expires_at: number;
+  command?: string;
+  statement?: string;
+  hostName?: string;
+  scope?: string;
   approved_at?: number;
   execution_owner?: string;
+  retry_lock?: string;
+  reconciled_at?: number;
   host_verification?: HostVerification;
   host_result?: HostResult;
 };
 type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
-type Pairing = { automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
+type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
+const reviewRetention = 24 * 60 * 60_000;
+const retentionScanInterval = 60 * 60_000;
 const pairingLifetime = 15 * 60_000;
+const pairingIdLength = 8;
+const pairingTokenLength = 10;
+const pairingAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+const validPairingId = (id: string) => /^[A-Za-z0-9]{8}$/u.test(id) || uuid.test(id);
+const validPairingToken = (token: string) => /^(?:[A-Za-z0-9]{10}|[0-9a-f-]{72})$/u.test(token);
+
+function randomPairingCode(length: number) {
+  return Array.from({ length }, () => pairingAlphabet[randomInt(pairingAlphabet.length)]).join('');
+}
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 export type PasskeyEnv = {
   PASSKEYS: DurableObjectNamespace<PasskeyApproval>;
+  AI?: DecisionModel;
   PASSKEY_ORIGIN?: string;
   PASSKEY_SETUP_TOKEN?: string;
   PASSKEY_LOCAL_TEST_JOB_TTL_MS?: string;
   HOST_PROBE?: {
     runHostEnrollmentCheck(expected: Host): Promise<HostResult>;
+    runApprovedCommand(expected: Host, command: string): Promise<HostResult>;
     restartDemoService(expected: Host): Promise<HostResult>;
     prepareEnrollment(): Promise<{ state: string; installCommand?: string; deviceTag?: string; devices?: TailnetDevice[]; loginUrl?: string; needsDeviceApproval?: boolean }>;
     startDeviceLogin(): Promise<boolean>;
     removeEnrollmentHost(expected: Host): Promise<boolean>;
-    prepareHostKey(address: string, account: HostAccount): Promise<string | null>;
+    prepareHostKey(address: string, account: HostAccount, commandExecution?: boolean): Promise<string | null>;
     configureTailnet(clientId: string, clientSecret: string): Promise<boolean>;
     saveEnrollmentHost(host: Host): Promise<boolean>;
   };
@@ -81,7 +109,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   #jobLifetime() {
     const testLifetime = Number(this.env.PASSKEY_LOCAL_TEST_JOB_TTL_MS);
     return passkeyOrigin(this.env)?.protocol === 'http:' &&
-      Number.isSafeInteger(testLifetime) && testLifetime > 0 && testLifetime < lifetime ? testLifetime : lifetime;
+      Number.isSafeInteger(testLifetime) && testLifetime > 0 && testLifetime < approvalLifetime ? testLifetime : approvalLifetime;
   }
 
   async #ownerAuthorized(token: unknown) {
@@ -91,8 +119,16 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       timingSafeEqual(Buffer.from(session.hash), Buffer.from(hashToken(token))));
   }
 
+  async authorizeReview(token: unknown) {
+    return this.#ownerAuthorized(token);
+  }
+
   async ownerState() {
-    return { enrolled: Boolean(await this.#credential()) };
+    return {
+      enrolled: Boolean(await this.#credential()),
+      pairingIdLength,
+      pairingTokenLength,
+    };
   }
 
   async #signInSeal(payload: string) {
@@ -227,6 +263,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         const current = await tx.get<Host>(slot) ?? (legacy?.address === address ? legacy : undefined);
         if (!current) return null;
         await tx.put(removal, current);
+        if (current.signedApproval && current.enrollmentId) await tx.delete('host-approval-key:' + current.enrollmentId);
         await tx.delete(slot);
         if (legacy?.address === address) await tx.delete('onboarding-host');
         const pairId = await tx.get<string>('pairing-address:' + address);
@@ -250,35 +287,39 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async beginAutomaticPairing(token: unknown) {
     if (!await this.#ownerAuthorized(token) || !await this.#credential()) return null;
     if ((await this.prepareHost(token))?.state !== 'connected') return null;
-    const id = crypto.randomUUID();
-    const pairingToken = crypto.randomUUID() + crypto.randomUUID();
-    await this.ctx.storage.put<Pairing>('pairing:' + id, {
-      id, address: '', automatic: true, account: maintenanceAccount,
-      tokenHash: hashToken(pairingToken), expires: Date.now() + pairingLifetime,
+    const pairingToken = randomPairingCode(pairingTokenLength);
+    const id = await this.ctx.storage.transaction(async tx => {
+      const id = await this.#unusedPairingId(tx);
+      await tx.put<Pairing>('pairing:' + id, {
+        id, address: '', automatic: true, commandExecution: true, signedApproval: true, account: maintenanceAccount,
+        tokenHash: hashToken(pairingToken), expires: Date.now() + pairingLifetime,
+      });
+      return id;
     });
     return this.#pairingCommand(id, maintenanceAccount, pairingToken);
+  }
+
+  async #unusedPairingId(tx: DurableObjectTransaction) {
+    let id = randomPairingCode(pairingIdLength);
+    while (await tx.get<Pairing>('pairing:' + id)) id = randomPairingCode(pairingIdLength);
+    return id;
   }
 
   #pairingCommand(id: string, account: HostAccount, pairingToken: string) {
     const url = new URL('/setup', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
-    // Run the menu as the invoking user with the terminal on stdin.
-    const launcher = [
-      'if ! [ -t 0 ]; then echo "Run this command in an interactive terminal." >&2; exit 1; fi',
-      'installer=$(mktemp) || exit 1',
-      'trap \'rm -f -- "$installer"\' EXIT',
-      'trap \'exit 1\' HUP INT TERM',
-      'curl -fsS -o "$installer" -H "$1" "$2" && sh "$installer"',
-    ].join('; ');
     return {
       id, account, download: { url: url.href, token: pairingToken },
-      installCommand: ['sh -c', shellQuote(launcher), 'pasta-setup',
-        shellQuote('Authorization: Bearer ' + pairingToken), shellQuote(url.href)].join(' '),
+      installCommand: [
+        'curl -fsS ' + shellQuote(url.href) + ' -H ' +
+          shellQuote('Authorization: Bearer ' + pairingToken) + ' -o pasta-setup.sh &&',
+        'sh pasta-setup.sh',
+      ].join('\n'),
     };
   }
 
   async claimPairing(id: string | null, token: string, address: string | null) {
-    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token) || !address || !validTailnetIpv4(address)) {
+    if (!id || !validPairingId(id) || !validPairingToken(token) || !address || !validTailnetIpv4(address)) {
       return { error: 'This machine has no usable Tailscale IPv4 address.', status: 400 };
     }
     const slot = 'pairing:' + id;
@@ -330,26 +371,37 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   async #beginPairing(token: unknown, address: string) {
     const probe = await this.prepareHost(token);
     if (probe?.state !== 'connected') return null;
-    const callbackToken = crypto.randomUUID() + crypto.randomUUID();
-    const id = crypto.randomUUID();
+    const callbackToken = randomPairingCode(pairingTokenLength);
     const pairing = await this.ctx.storage.transaction(async tx => {
       const slot = 'pairing-address:' + address;
       const previousId = await tx.get<string>(slot);
       const previous = previousId ? await tx.get<Pairing>('pairing:' + previousId) : undefined;
       if (previous?.fingerprint) return previous;
+      const id = await this.#unusedPairingId(tx);
       if (previousId) await tx.delete('pairing:' + previousId);
-      const next = { id, address, account: maintenanceAccount, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
+      const next = { id, address, commandExecution: true, signedApproval: true, account: maintenanceAccount, tokenHash: hashToken(callbackToken), expires: Date.now() + pairingLifetime };
       await tx.put('pairing:' + id, next);
       await tx.put(slot, id);
       return next;
     });
     if (!pairing) return null;
     if (pairing.fingerprint) return { id: pairing.id };
-    return this.#pairingCommand(id, pairing.account ?? legacyAccount, callbackToken);
+    return this.#pairingCommand(pairing.id, pairing.account ?? legacyAccount, callbackToken);
+  }
+
+  async #pairingApprovalKey(id: string) {
+    const key = 'host-approval-key:' + id;
+    return this.ctx.storage.transaction(async tx => {
+      const existing = await tx.get<ReturnType<typeof createHostApprovalKey>>(key);
+      if (existing) return existing;
+      const created = createHostApprovalKey();
+      await tx.put(key, created);
+      return created;
+    });
   }
 
   async pairingScript(id: string | null, token: string, claimed = false) {
-    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
+    if (!id || !validPairingId(id) || !validPairingToken(token)) return null;
     const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
     if (!pair || !pair.tokenHash || pair.fingerprint || pair.expires <= Date.now() ||
         !timingSafeEqual(Buffer.from(pair.tokenHash), Buffer.from(hashToken(token)))) return null;
@@ -362,8 +414,9 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       ].join('\n');
     }
     const account = pair.account ?? legacyAccount;
-    const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address, account).catch(() => null);
+    const install = await this.env.HOST_PROBE?.prepareHostKey(pair.address, account, pair.commandExecution).catch(() => null);
     if (!install) return null;
+    const approvalKey = pair.signedApproval ? await this.#pairingApprovalKey(id) : undefined;
     const url = new URL(prefix + '/host-pairing', passkeyOrigin(this.env));
     url.searchParams.set('pair', id);
     return [
@@ -371,17 +424,21 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       'target_address=' + shellQuote(pair.address),
       'target_name=' + shellQuote((pair.addressName ?? pair.address).replace(/[\x00-\x1f\x7f]/gu, '').slice(0, 160)),
       'account=' + shellQuote(account),
+      'command_execution=' + (pair.commandExecution ? 'yes' : 'no'),
       'pairing_token=' + shellQuote(token),
       'callback_url=' + shellQuote(url.href),
       'result_url=' + shellQuote(pair.automatic ? new URL(prefix + '/pair-result?pair=' + id, passkeyOrigin(this.env)).href : ''),
       'install_command=' + shellQuote(install),
+      'approval_gate=' + shellQuote(approvalKey ? hostApprovalGate : ''),
+      'approval_public_key=' + shellQuote(approvalKey?.publicKey ?? ''),
+      'approval_target=' + shellQuote(JSON.stringify({ host: pair.address, enrollment: id })),
       pairingInstaller,
     ].join('\n');
   }
 
   async cancelPairing(token: unknown, id: unknown) {
     if (!await this.#ownerAuthorized(token) || !await this.#credential() ||
-        typeof id !== 'string' || !uuid.test(id)) return null;
+        typeof id !== 'string' || !validPairingId(id)) return null;
     return this.ctx.storage.transaction(async tx => {
       const slot = 'pairing:' + id;
       const pair = await tx.get<Pairing>(slot);
@@ -395,7 +452,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   }
 
   async receiveFingerprint(id: string | null, callbackToken: string, fingerprint: unknown, accountAction: unknown, selectedAccount: unknown) {
-    if ((id !== null && !uuid.test(id)) || !/^[0-9a-f-]{72}$/u.test(callbackToken)) return false;
+    if ((id !== null && !validPairingId(id)) || !validPairingToken(callbackToken)) return false;
     const canceled = accountAction === 'canceled';
     const candidateFingerprint = typeof fingerprint === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/u.test(fingerprint)
       ? fingerprint : undefined;
@@ -429,7 +486,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   }
 
   async pairingReceipt(id: string | null, token: string) {
-    if (!id || !uuid.test(id) || !/^[0-9a-f-]{72}$/u.test(token)) return null;
+    if (!id || !validPairingId(id) || !validPairingToken(token)) return null;
     const pair = await this.ctx.storage.get<Pairing>('pairing:' + id);
     if (!pair?.receiptHash || pair.expires <= Date.now() || pair.receiptHash !== hashToken(token)) return null;
     if (!pair.check || this.#finishingPairings.has(id)) return 'verifying';
@@ -469,7 +526,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
 
   async #verifyAutomaticPairing(pair: Pairing, slot: string) {
     if (!pair.fingerprint || !this.env.HOST_PROBE) return { state: 'verification_failed', failure: 'unconfigured' };
-    const host: Host = { address: pair.address, fingerprint: pair.fingerprint, account: pair.account, enrollmentId: pair.id };
+    const host: Host = { address: pair.address, fingerprint: pair.fingerprint, account: pair.account, enrollmentId: pair.id, commandExecution: pair.commandExecution, signedApproval: pair.signedApproval };
     let check: HostResult = { state: 'check_outcome_unknown', executed: null };
     try {
       if (await this.env.HOST_PROBE.saveEnrollmentHost(host)) {
@@ -492,7 +549,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         await this.ctx.storage.get('removing-host:' + pair.address)) return null;
     const legacy = await this.ctx.storage.get<Host>('onboarding-host');
     const host = {
-      address: pair.address, fingerprint: pair.fingerprint, account: pair.account,
+      address: pair.address, fingerprint: pair.fingerprint, account: pair.account, commandExecution: pair.commandExecution, signedApproval: pair.signedApproval,
       enrollmentId: slot === 'pairing' || (legacy?.address === pair.address && legacy.fingerprint === pair.fingerprint)
         ? undefined : pair.id,
     };
@@ -515,7 +572,21 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return { ...await this.start(reviewJobId, true, host.address), account_action: pair.accountAction };
   }
 
-  async start(jobId: string, enrollment = false, address?: string, restart = false) {
+  async #pairedHostName(address: string, fingerprint: string, enrollmentId?: string) {
+    if (!enrollmentId) return undefined;
+    const pair = await this.ctx.storage.get<Pairing>('pairing:' + enrollmentId);
+    if (pair?.address !== address || pair.fingerprint !== fingerprint) return undefined;
+    return pair.addressName?.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim().slice(0, 160) || undefined;
+  }
+
+  async requestCommand(jobId: string, address: string, command: string, statement: string) {
+    const parser = await classify(command).catch(() => undefined);
+    if (!parser) return { state: 'command_validation_unavailable', ...empty };
+    if (parser.decision === 'invalid') return { state: 'invalid_command', reason: parser.reason, ...empty };
+    return this.start(jobId, true, address, command === commandRestart, command, statement, parser);
+  }
+
+  async start(jobId: string, enrollment = false, address?: string, restart = false, command?: string, statement?: string, parser?: Awaited<ReturnType<typeof classify>>) {
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
     if (!credential) return { state: 'enrollment_required', ...empty };
@@ -532,17 +603,38 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         (legacy?.address === address ? legacy : undefined) : hosts?.values().next().value ?? legacy;
     }
     if (enrollment && !host) return { state: 'host_setup_required', ...empty };
-    const target = host ? { ...hostCheck, host: host.address, fingerprint: host.fingerprint, execution_identity: host.account ?? legacyAccount, enrollmentId: host.enrollmentId, operation: restart ? restartOperation : hostCheck.operation } : diagnostic;
+    const dynamic = Boolean(command && host?.signedApproval);
+    if (command && host?.commandExecution && !host.signedApproval) {
+      return { state: 'host_command_setup_required', ...empty };
+    }
+    if (command && !dynamic && command !== commandCheck && command !== commandRestart) {
+      return { state: 'host_command_setup_required', ...empty };
+    }
+    const target = host ? {
+      ...hostCheck, host: host.address, fingerprint: host.fingerprint,
+      execution_identity: host.account ?? legacyAccount, enrollmentId: host.enrollmentId,
+      commandExecution: host.commandExecution, signedApproval: host.signedApproval,
+      operation: dynamic ? commandOperation : restart ? restartOperation : hostCheck.operation,
+    } : diagnostic;
     const options = await generateAuthenticationOptions({
       rpID: origin.hostname, userVerification: 'required',
       allowCredentials: [{ id: credential.id, transports: credential.transports }],
     });
+    const hostName = command && host ? await this.#pairedHostName(host.address, host.fingerprint, host.enrollmentId) : undefined;
+    let scope: string | undefined;
+    if (command && !await this.ctx.storage.get<Job>(key)) {
+      scope = parser
+        ? await assessScope(this.env.AI, command, { screening_reason: parser.reason, syntax_facts: parser.syntax_facts })
+        : scopeUnavailable;
+    }
     const matches = await this.ctx.storage.transaction(async tx => {
       const existing = await tx.get<Job>(key);
-      if (existing) return existing.target.operation === target.operation &&
+      if (existing) return existing.command === command && existing.statement === statement && existing.target.operation === target.operation &&
         existing.target.host === target.host && (target.dry_run || (!existing.target.dry_run &&
-          existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId));
-      await tx.put<Job>(key, { target, options, expires_at: Date.now() + this.#jobLifetime() });
+          existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId &&
+          Boolean(existing.target.commandExecution) === Boolean(target.commandExecution) &&
+          Boolean(existing.target.signedApproval) === Boolean(target.signedApproval)));
+      await tx.put<Job>(key, { target, options, ...(command ? { command, statement, hostName, scope } : {}), expires_at: Date.now() + this.#jobLifetime() });
       return true;
     });
     if (!matches) return { state: 'job_id_in_use', ...empty };
@@ -552,7 +644,43 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       : status;
   }
 
-  async status(jobId: string) {
+  async #scheduleRetention() {
+    if (await this.ctx.storage.getAlarm() === null) {
+      await this.ctx.storage.setAlarm(Date.now() + retentionScanInterval);
+    }
+  }
+
+  async alarm() {
+    const cursor = await this.ctx.storage.get<string>('job-retention-cursor');
+    const batch = await this.ctx.storage.list<Job>({
+      prefix: 'job:', limit: 100, ...(cursor ? { startAfter: cursor } : {}),
+    });
+    for (const [key, job] of batch) {
+      if (job.expires_at + reviewRetention > Date.now()) continue;
+      await this.ctx.storage.transaction(async tx => {
+        const current = await tx.get<Job>(key);
+        if (!current || current.expires_at + reviewRetention > Date.now()) return;
+        const { command, statement, scope, host_result, ...summary } = current;
+        if (command === undefined && statement === undefined && scope === undefined &&
+            (!host_result || !('stdout' in host_result || 'stderr' in host_result))) return;
+        if (host_result) {
+          const { stdout, stderr, ...result } = host_result as typeof host_result & { stdout?: string; stderr?: string };
+          summary.host_result = result as HostResult;
+        }
+        await tx.put<Job>(key, summary);
+      });
+    }
+    if (batch.size === 100) {
+      await this.ctx.storage.put('job-retention-cursor', [...batch.keys()].at(-1)!);
+      await this.ctx.storage.setAlarm(Date.now() + 1000);
+    } else {
+      await this.ctx.storage.delete('job-retention-cursor');
+      await this.ctx.storage.setAlarm(Date.now() + retentionScanInterval);
+    }
+  }
+
+  async status(jobId: string, includeOutput = true) {
+    await this.#scheduleRetention();
     const job = await this.ctx.storage.get<Job>('job:' + jobId);
     if (!job) return { state: 'unknown', ...empty };
     const checkingState = job.approved_at &&
@@ -560,16 +688,30 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       ? 'check_outcome_unknown' : 'checking_host';
     const approvedState = job.target.dry_run ? 'verified_dry_run' : job.host_result?.state ?? job.host_verification ?? checkingState;
     const { host, operation, execution_identity, dry_run } = job.target;
+    const hostResult = job.host_result;
+    const retained = job.expires_at + reviewRetention > Date.now();
+    const hiddenOutput = (!includeOutput || !retained) && hostResult
+      ? { stdout: undefined, stderr: undefined } : {};
     return {
       job_id: jobId, host, operation, execution_identity, dry_run,
+      ...(retained && job.command ? {
+        command: job.command,
+        statement: job.statement,
+        host_name: job.hostName ?? (job.target.dry_run ? undefined :
+          await this.#pairedHostName(host, job.target.fingerprint, job.target.enrollmentId)),
+        explanation: job.scope ?? scopeUnavailable,
+      } : {}),
       ...(!job.target.dry_run ? { fingerprint: job.target.fingerprint } : {}),
       ...(operation === restartOperation ? { service: restartUnit, run_as: 'root via sudo' } : {}), expires_at: job.expires_at,
-      ...job.host_result,
+      ...hostResult,
+      ...hiddenOutput,
       executed: job.host_result ? job.host_result.executed : (
         job.approved_at && !job.target.dry_run ? null : false
       ),
       state: job.approved_at ? approvedState : job.expires_at <= Date.now() ? 'expired' : 'pending',
       approved_at: job.approved_at ?? null,
+      can_reconcile: Boolean(job.retry_lock && !job.reconciled_at && (hostResult ?
+        hostResult.executed === null : job.approved_at && Date.now() >= job.approved_at + lifetime)),
     };
   }
 
@@ -604,6 +746,20 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return job.options;
   }
 
+  async reconcile(jobId: string) {
+    const key = 'job:' + jobId;
+    return this.ctx.storage.transaction(async tx => {
+      const job = await tx.get<Job>(key);
+      if (!job?.approved_at || !job.retry_lock || await tx.get(job.retry_lock) !== key) return false;
+      const ambiguous = job.host_result ? job.host_result.executed === null :
+        Date.now() >= job.approved_at + lifetime;
+      if (!ambiguous) return false;
+      await tx.delete(job.retry_lock);
+      await tx.put<Job>(key, { ...job, reconciled_at: Date.now() });
+      return true;
+    });
+  }
+
   async approve(jobId: string, response: AuthenticationResponseJSON) {
     const origin = passkeyOrigin(this.env)!;
     const key = 'job:' + jobId;
@@ -616,25 +772,38 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       expectedRPID: origin.hostname, credential, requireUserVerification: true,
     }).catch(() => null);
     if (!verification?.verified) return false;
+    const retryLock = !job.target.dry_run &&
+      (job.target.operation === commandOperation || job.target.operation === restartOperation)
+      ? 'retry-lock:' + hashToken(JSON.stringify([
+        job.target.host, job.target.execution_identity, job.command ?? commandRestart,
+      ]))
+      : undefined;
     const accepted = await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Job>(key);
       const stored = await tx.get<WebAuthnCredential>('credential');
       if (!current || current.approved_at || current.expires_at <= Date.now() ||
           stored?.id !== credential.id || stored.counter !== credential.counter) return false;
+      if (retryLock) {
+        if (await tx.get(retryLock)) return false;
+        await tx.put(retryLock, key);
+      }
       await tx.put('credential', { ...credential, counter: verification.authenticationInfo.newCounter });
-      await tx.put<Job>(key, { ...current, approved_at: Date.now(), execution_owner: this.#executionOwner });
+      await tx.put<Job>(key, { ...current, approved_at: Date.now(), execution_owner: this.#executionOwner,
+        ...(retryLock ? { retry_lock: retryLock } : {}),
+      });
       return true;
     });
     if (accepted && !job.target.dry_run) {
       const expected = {
         address: job.target.host, fingerprint: job.target.fingerprint, enrollmentId: job.target.enrollmentId, account: job.target.execution_identity,
+        commandExecution: job.target.commandExecution, signedApproval: job.target.signedApproval,
       };
-      this.ctx.waitUntil(this.#verifyHost(key, expected, job.target.operation));
+      this.ctx.waitUntil(this.#verifyHost(key, expected, job.target.operation, job.command));
     }
     return accepted;
   }
 
-  async #verifyHost(key: string, expected: Host, operation: string) {
+  async #verifyHost(key: string, expected: Host, operation: string, command?: string) {
     let result: HostResult = { state: 'unconfigured', executed: false };
     const enrolled = await this.ctx.storage.get<Host>('onboarding-host:' + expected.address);
     const legacy = await this.ctx.storage.get<Host>('onboarding-host');
@@ -642,13 +811,28 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     if (removing || !sameEnrollmentHost(enrolled ?? legacy, expected)) {
       result = { state: 'target_changed', executed: false };
     } else if (this.env.HOST_PROBE && validEnrollmentHost(expected)) {
-      result = await (operation === restartOperation ? this.env.HOST_PROBE.restartDemoService(expected)
-        : this.env.HOST_PROBE.runHostEnrollmentCheck(expected)).catch(() => ({ state: 'check_outcome_unknown', executed: null }));
+      const signingKey = operation === commandOperation && expected.signedApproval && expected.enrollmentId
+        ? await this.ctx.storage.get<ReturnType<typeof createHostApprovalKey>>('host-approval-key:' + expected.enrollmentId)
+        : undefined;
+      const authorization = command && signingKey && expected.enrollmentId && expected.account
+        ? signHostApproval(signingKey.privateKey, {
+          job: key.slice('job:'.length), enrollment: expected.enrollmentId,
+          host: expected.address, account: expected.account, command,
+        }) : undefined;
+      const action = operation === commandOperation
+        ? authorization ? this.env.HOST_PROBE.runApprovedCommand(expected, authorization)
+          : Promise.resolve({ state: 'unconfigured' as const, executed: false as const })
+        : operation === restartOperation ? this.env.HOST_PROBE.restartDemoService(expected)
+        : this.env.HOST_PROBE.runHostEnrollmentCheck(expected);
+      result = await action.catch(() => ({ state: 'check_outcome_unknown', executed: null }));
     }
     await this.ctx.storage.transaction(async tx => {
       const job = await tx.get<Job>(key);
       if (!job?.approved_at) return;
       await tx.put<Job>(key, { ...job, host_result: result });
+      if (result.executed !== null && job.retry_lock && await tx.get(job.retry_lock) === key) {
+        await tx.delete(job.retry_lock);
+      }
       const current = await tx.get<Host>('onboarding-host:' + expected.address);
       const legacyHost = await tx.get<Host>('onboarding-host');
       if (operation !== hostCheck.operation || !sameEnrollmentHost(current ?? legacyHost, expected)) return;
@@ -691,6 +875,11 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
       if (!authorization.startsWith('Bearer ')) return reject(403);
       const state = await store.pairingReceipt(url.searchParams.get('pair'), authorization.slice(7));
       return state ? new Response(state + '\n', { headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } }) : reject(403);
+    }
+    if (path === '/setup-preview') {
+      return new Response('#!/bin/sh\n' + pairingDetector, {
+        headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' },
+      });
     }
     if (path === '/style.css') {
       return new Response(approvalStyles, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
@@ -780,14 +969,17 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return result ? reply(result) : reject(403);
   }
   if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
+  if (['/review-options', '/approve', '/job-status', '/reconcile'].includes(path) &&
+      !await store.authorizeReview(body.token)) return reject(403);
   if (path === '/review-options') {
     const options = await store.reviewOptions(body.job);
-    return options ? reply({ options, job: await store.status(body.job) }) : reject(409);
+    return options ? reply({ options, job: await store.status(body.job, false) }) : reject(409);
   }
   if (path === '/approve') {
     return await store.approve(body.job, body.response as AuthenticationResponseJSON)
-      ? reply(await store.status(body.job)) : reject(409);
+      ? reply(await store.status(body.job, false)) : reject(409);
   }
-  if (path === '/job-status') return reply(await store.status(body.job));
+  if (path === '/reconcile') return await store.reconcile(body.job) ? reply({ reconciled: true }) : reject(409);
+  if (path === '/job-status') return reply(await store.status(body.job, false));
   return reject(404);
 }

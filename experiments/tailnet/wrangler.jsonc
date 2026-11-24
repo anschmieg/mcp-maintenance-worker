@@ -1,5 +1,5 @@
 {
-  "name": "maintenance-tailnet-ssh-probe",
+  "name": "pasta-tailnet-ssh-probe",
   "main": "probe.ts",
   "compatibility_date": "2026-09-01",
   "workers_dev": false,

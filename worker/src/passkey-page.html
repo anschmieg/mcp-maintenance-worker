@@ -25,6 +25,30 @@
   </ol>
   <h1 id="title">Maintenance approval</h1>
   <p id="details" class="lead"></p>
+  <section id="command-display" aria-labelledby="command-label" hidden>
+    <h2 id="command-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l5 5-5 5m8 0h7"/></svg> Command</h2>
+    <code></code>
+  </section>
+  <table id="review-command" aria-label="Command details" hidden>
+    <tbody>
+      <tr>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v11H4z M9 21h6 M12 17v4"/></svg><span>Host</span></th>
+        <td>
+          <span data-review="host"></span>
+          <span data-review="run-as" hidden></span>
+        </td>
+      </tr>
+      <tr>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 11v5m0-8h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0"/></svg><span>Scope</span></th>
+        <td data-review="explanation"></td>
+      </tr>
+      <tr hidden>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l1.5-4A8.5 8.5 0 1 1 21 11.5Z"/></svg><span>Reason</span></th>
+        <td data-review="statement"></td>
+      </tr>
+    </tbody>
+  </table>
+  <p id="review-deadline" class="hint" hidden></p>
   <form id="setup" hidden>
     <label for="token">Setup code</label>
     <input id="token" name="token" type="password" autocomplete="off" required aria-describedby="setup-hint">
@@ -51,13 +75,14 @@
   </details>
   <section id="pair-command" hidden>
     <label for="install-command">Host setup command</label>
-    <p class="hint">Run it on the Linux host you want to add from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes.</p>
-    <textarea id="install-command" rows="3" readonly spellcheck="false"></textarea>
+    <p class="hint">Run it on the Linux host you want to add from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes. Run it from a private directory and delete pasta-setup.sh after setup.</p>
+    <textarea id="install-command" rows="4" readonly spellcheck="false"></textarea>
     <div class="command-actions">
       <button id="copy-install" type="button">Copy command</button>
     </div>
     <details>
       <summary>Inspect the device-detection script</summary>
+      <p class="hint">This preview omits your pairing credentials.</p>
       <textarea id="script-preview" rows="12" readonly aria-label="Host setup script"></textarea>
     </details>
   </section>

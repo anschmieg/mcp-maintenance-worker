@@ -101,7 +101,19 @@ The restart uses non-interactive sudo. If the selected account needs permission,
 pasta-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart openbot-maintenance-demo.service
 ```
 
-PaSTA requires a fresh passkey approval for each restart. OpenSSH enforces the key’s fixed command allowlist on the host. Protect the Worker’s SSH private key, since a caller who obtains it could invoke those allowed commands directly within the host’s sudo policy. Enroll the host using the current wizard so its SSH key has the latest forced command. Existing enrollments keep their recorded SSH account. If you enable the restart for an existing enrollment, use that account in the sudo rule. For enrollments made with the earlier check-only key, remove that enrollment and its old public key from the host, then pair again. Ask your MCP client to call `request_service_restart` for the enrolled host, open the review link, and approve it with the owner passkey. The page shows the target and unit before approval. Your MCP client can retrieve the result by job UUID with `passkey_test_status`. A timeout with an unknown outcome requires checking the host before submitting a fresh approval.
+PaSTA requires a fresh passkey approval for each restart. Ask the MCP client to call `request_service_restart` and approve the host and unit shown in the review. The client can retrieve the result by job UUID with `passkey_test_status`.
+
+### Request-time Bash commands
+
+On hosts paired with the current installer, call `request_maintenance_command` with the host’s Tailscale IPv4, a fresh job UUID, the exact Bash command, and a short reason. The Worker verifies Bash syntax and uses Clef to describe likely effects. The owner’s passkey approves the stored command and SSH target once. The authenticated MCP status tool returns the exit status and bounded stdout and stderr. The owner signs in with a passkey before the review reveals command details. Keep secrets out of commands and reasons. Command details and output stop being served 24 hours after the approval deadline and are removed by background cleanup.
+
+New enrollments default to the dedicated maintenance account. The approval Worker signs a 30-second authorization for the exact Bash command, account, address and enrollment. The SSH forced command sends it to a root-owned verification gate, which records the job ID before dropping privileges to the paired account. Setup requires Python 3, OpenSSL with Ed25519 support, and sudo. The separately configured fixed demo restart still uses its existing SSH rule.
+
+To migrate an older dynamic enrollment, remove the old PaSTA key line from that account’s SSH authorized keys and remove the host from PaSTA before re-pairing. Removing the enrollment revokes Worker-side keys. Removing the host-side key line closes the legacy SSH entry point.
+
+The installer restricts the OpenSSH key to the PaSTA forced command and disables forwarding and interactive login. The Worker holds the private SSH key. Dynamic commands also require an approval signature that the host validates separately. Use a dedicated non-root account with only the permissions it needs.
+
+Existing enrollments keep their fixed operations. To enable request-time commands on an existing host, remove its enrollment and old authorized key, then run the current pairing wizard. If the result of a command is unknown, check the host before retrying.
 
 ### Optional tagged enrollment
 
@@ -114,7 +126,7 @@ Add the following service binding to the maintenance Worker's deployment config:
   "services": [
     {
       "binding": "HOST_PROBE",
-      "service": "maintenance-tailnet-ssh-probe",
+      "service": "pasta-tailnet-ssh-probe",
       "entrypoint": "HostVerifier"
     }
   ]
