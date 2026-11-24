@@ -52,6 +52,7 @@ type Job = {
 type Enrollment = { challenge: string; expires: number };
 type PairingProgress = { state: string; host?: string; failure?: string };
 type Pairing = { commandExecution?: boolean; signedApproval?: boolean; automatic?: boolean; check?: HostResult; addressName?: string; probeAddress?: string; unsupportedPlatform?: boolean; receiptHash?: string; id: string; address: string; tokenHash: string; expires: number; fingerprint?: string; reviewJobId?: string; account?: HostAccount; accountAction?: 'created' | 'reused' | 'existing' | 'canceled' };
+const ownerSessionSeconds = 7 * 24 * 60 * 60;
 const reviewRetention = 24 * 60 * 60_000;
 const retentionScanInterval = 60 * 60_000;
 const pairingLifetime = 15 * 60_000;
@@ -176,7 +177,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       const recent = Object.fromEntries(Object.entries(used).filter(([, deadline]) => deadline > now));
       await tx.put('credential', { ...credential, counter: verification.authenticationInfo.newCounter });
       await tx.put('used-owner-challenges', { ...recent, [challenge]: expires });
-      await tx.put('owner-session', { hash: hashToken(token), expires: now + 30 * 60_000 });
+      await tx.put('owner-session', { hash: hashToken(token), expires: now + ownerSessionSeconds * 1000 });
       return true;
     });
     return accepted ? token : null;
@@ -219,7 +220,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       if (current?.challenge !== enrollment.challenge || current.expires <= Date.now() || await tx.get('credential')) return false;
       await tx.put('credential', credential);
       await tx.delete('enrollment');
-      await tx.put('owner-session', { hash: hashToken(session), expires: Date.now() + 30 * 60_000 });
+      await tx.put('owner-session', { hash: hashToken(session), expires: Date.now() + ownerSessionSeconds * 1000 });
       return session;
     });
   }
@@ -959,6 +960,11 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   const body = await request.json().catch(() => null) as Record<string, unknown> | null;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return reject(400);
   const reply = (data: unknown) => Response.json(data, { headers });
+  const sessionCookie = request.headers.get('Cookie')?.match(/(?:^|;\s*)__Host-pasta-owner=([0-9a-f-]{72})(?:;|$)/u)?.[1];
+  const ownerReply = (data: unknown, token: string) => Response.json(data, {
+    headers: { ...headers, 'Set-Cookie': `__Host-pasta-owner=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ownerSessionSeconds}` },
+  });
+  if (path === '/review-session') return reply({ signedIn: await store.authorizeReview(sessionCookie) });
   if (path === '/owner-state') return reply(await store.ownerState());
   if (path === '/sign-in-options') {
     const options = await store.signInOptions();
@@ -966,7 +972,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   }
   if (path === '/sign-in') {
     const token = await store.signIn(body.id, body.response as AuthenticationResponseJSON);
-    return token ? reply({ token }) : reject(403);
+    return token ? ownerReply({ token }, token) : reject(403);
   }
   if (path === '/setup-state') {
     const setup = await store.setupState(body.token);
@@ -978,7 +984,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   }
   if (path === '/enroll') {
     const token = await store.enroll(body.token, body.response as RegistrationResponseJSON);
-    return token ? reply({ enrolled: true, token }) : reject(403);
+    return token ? ownerReply({ enrolled: true, token }, token) : reject(403);
   }
   if (path === '/prepare-host') {
     const setup = await store.prepareHost(body.token);
@@ -1009,7 +1015,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
   }
   if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
   if (['/review-options', '/approve', '/job-status', '/reconcile'].includes(path) &&
-      !await store.authorizeReview(body.token)) return reject(403);
+      !await store.authorizeReview(body.token ?? sessionCookie)) return reject(403);
   if (path === '/review-options') {
     const options = await store.reviewOptions(body.job);
     return options ? reply({ options, job: await store.status(body.job, false) }) : reject(409);
