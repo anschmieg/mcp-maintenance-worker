@@ -22,6 +22,22 @@ type Grant = Authorization & {
 };
 
 export class OAuthGrant extends DurableObject<OAuthEnv> {
+  #indexedUntil = 0;
+
+  async #publishConnection(id: string, redirect: string, expires: number) {
+    if (this.#indexedUntil === expires) return;
+    const callback = new URL(redirect);
+    try {
+      await approvalStore(this.env).recordMcpConnection({
+        id, name: redirect === this.env.OAUTH_REDIRECT_URI ? 'OpenBot' : 'Local MCP client',
+        callback: callback.host, connectedAt: expires - grantLifetime, expires,
+      });
+      this.#indexedUntil = expires;
+    } catch {
+      console.warn('Could not update the MCP connection inventory.');
+    }
+  }
+
   async start(auth: Authorization) {
     await this.ctx.storage.put('grant', { ...auth, expires: Date.now() + 5 * minute });
     await this.ctx.storage.setAlarm(Date.now() + 5 * minute);
@@ -42,8 +58,8 @@ export class OAuthGrant extends DurableObject<OAuthEnv> {
     });
   }
 
-  async exchange(client: string, resource: string, proof: string, redirect: string | null, verifier: string | null) {
-    return this.ctx.storage.transaction(async tx => {
+  async exchange(id: string, client: string, resource: string, proof: string, redirect: string | null, verifier: string | null) {
+    const result = await this.ctx.storage.transaction(async tx => {
       const grant = await tx.get<Grant>('grant');
       const now = Date.now();
       if (!grant || grant.expires <= now || grant.client !== client || grant.resource !== resource) return null;
@@ -58,13 +74,17 @@ export class OAuthGrant extends DurableObject<OAuthEnv> {
       const accessExpires = Math.min(expires, now + accessLifetime);
       await tx.put('grant', { ...grant, code: undefined, access: digest(access), refresh: digest(refresh), accessExpires, expires });
       await tx.setAlarm(expires);
-      return { access, refresh, expiresIn: Math.floor((accessExpires - now) / 1000) };
+      return { access, refresh, expiresIn: Math.floor((accessExpires - now) / 1000), redirect: grant.redirect, expires };
     });
+    if (result) await this.#publishConnection(id, result.redirect, result.expires);
+    return result;
   }
 
-  async accepts(resource: string, token: string) {
+  async accepts(id: string, resource: string, token: string) {
     const grant = await this.ctx.storage.get<Grant>('grant');
-    return Boolean(grant && grant.resource === resource && (grant.accessExpires ?? 0) > Date.now() && grant.access === digest(token));
+    if (!grant || grant.resource !== resource || (grant.accessExpires ?? 0) <= Date.now() || grant.access !== digest(token)) return false;
+    await this.#publishConnection(id, grant.redirect, grant.expires);
+    return true;
   }
 
   async alarm() {
@@ -111,7 +131,7 @@ export function oauthUnauthorized(env: OAuthEnv) {
 export async function authenticatedOAuthGrant(env: OAuthEnv, token: string) {
   const settings = config(env);
   const parsed = parts(token);
-  if (settings && parsed && await store(env, parsed.id).accepts(settings.resource, parsed.secretPart)) return parsed.id;
+  if (settings && parsed && await store(env, parsed.id).accepts(parsed.id, settings.resource, parsed.secretPart)) return parsed.id;
 }
 
 export async function oauthRoute(request: Request, env: OAuthEnv) {
@@ -209,7 +229,7 @@ export async function oauthRoute(request: Request, env: OAuthEnv) {
   if ((verifier !== null && !/^[A-Za-z0-9._~-]{43,128}$/u.test(verifier)) || (form.get('scope') ?? scope) !== scope) return invalid();
   const parsed = parts(form.get(isCode ? 'code' : 'refresh_token') ?? '');
   if (!parsed) return invalid('invalid_grant');
-  const tokens = await store(env, parsed.id).exchange(client, resource, parsed.secretPart, form.get('redirect_uri'), verifier);
+  const tokens = await store(env, parsed.id).exchange(parsed.id, client, resource, parsed.secretPart, form.get('redirect_uri'), verifier);
   return tokens ? response({
     access_token: parsed.id + '.' + tokens.access, refresh_token: parsed.id + '.' + tokens.refresh,
     token_type: 'Bearer', expires_in: tokens.expiresIn, scope,

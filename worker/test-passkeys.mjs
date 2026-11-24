@@ -202,6 +202,10 @@ assert.equal((await tokenRequest({ ...codeGrant, resource: origin + '/wrong' }))
 const exchanges = await Promise.all([tokenRequest(codeGrant), tokenRequest(codeGrant)]);
 assert.deepEqual(exchanges.map(result => result.status).sort(), [200, 400]);
 const { access_token, refresh_token } = await exchanges.find(result => result.ok).json();
+const connectionInventory = await (await cookieRequest('standing-rules', {})).json();
+assert.deepEqual(connectionInventory.clients.map(({ id, active }) => ({ id, active })), [{ id: transaction, active: true }]);
+assert.ok(connectionInventory.clients[0].name);
+assert.ok(connectionInventory.sharedBearerConfigured);
 const oauthJob = randomUUID();
 assert.equal((await call('start_passkey_test', oauthJob, undefined, undefined, undefined, access_token)).executed, false);
 assert.equal((await cookieRequest('approve', { job: oauthJob, token: access_token })).status, 403);
@@ -636,6 +640,11 @@ assert.equal((await cookieRequest('add-standing-rule', { grant: transaction, add
 assert.equal((await cookieRequest('add-standing-rule', { grant: transaction, address: detectedAddress, command: 'uptime' })).status, 200);
 const policy = await (await cookieRequest('standing-rules', {})).json();
 assert.equal(policy.rules.length, 1);
+assert.equal(policy.rules[0].available, true);
+assert.equal(policy.hosts.find(host => host.address === detectedAddress).name, 'Auto host');
+assert.ok(policy.hosts.find(host => host.address === address));
+assert.equal((await cookieRequest('add-standing-rule', { grant: b64(randomBytes(32)),
+  address: detectedAddress, command: 'uptime' })).status, 403);
 const rationale = 'Check the host uptime.';
 const standingRequest = (id, host, command, token = renewedToken, headers) =>
   call('request_maintenance_command', id, host, command, rationale, token, headers);
@@ -656,7 +665,15 @@ assert.equal(autoResult.state, 'command_completed');
 assert.match(autoResult.stdout, /fixture uptime/u);
 assert.deepEqual(await standingRequest(autoJob, detectedAddress, 'uptime'), autoResult);
 assert.equal(await attempts(), attemptsBeforePolicy + 1);
-assert.equal((await cookieRequest('remove-standing-rule', { id: policy.rules[0].id })).status, 200);
+const ruleId = policy.rules[0].id;
+assert.equal((await cookieRequest('add-standing-rule', { id: ruleId, grant: transaction,
+  address: detectedAddress, command: 'df -h /srv/techleaddocker' })).status, 200);
+const updatedPolicy = await (await cookieRequest('standing-rules', {})).json();
+assert.equal(updatedPolicy.rules.length, 1);
+assert.equal(updatedPolicy.rules[0].id, ruleId);
+assert.equal(updatedPolicy.rules[0].command, 'df -h /srv/techleaddocker');
+assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime')).state, 'pending');
+assert.equal((await cookieRequest('remove-standing-rule', { id: ruleId })).status, 200);
 assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime')).state, 'pending');
 console.log('PASS: an exact, host-bound standing approval applies only to the verified OAuth connection and can be revoked');
 

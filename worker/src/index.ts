@@ -9,7 +9,7 @@ import { authenticatedOAuthGrant, oauthRoute, oauthUnauthorized, type OAuthEnv }
 export { OAuthGrant } from './oauth';
 export { TimingProbe };
 export { PasskeyApproval } from './passkeys';
-type Env = OAuthEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
+type Env = OAuthEnv & { PROBES: DurableObjectNamespace<TimingProbe> };
 
 const grantHeader = 'x-pasta-verified-oauth-grant';
 

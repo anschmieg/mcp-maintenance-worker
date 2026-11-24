@@ -44,7 +44,7 @@ async function post(path, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error('Request rejected');
+  if (!response.ok) throw Object.assign(new Error('Request rejected'), { status: response.status });
   return response.json();
 }
 
@@ -375,72 +375,207 @@ function hostSetup(token) {
   });
 }
 
-if (location.pathname.endsWith('/admin')) {
-  const panel = document.querySelector('#standing-rules');
+async function startAdmin() {
+  const dashboard = document.querySelector('#standing-rules');
   const form = document.querySelector('#standing-form');
-  const client = document.querySelector('#standing-client');
-  const host = document.querySelector('#standing-host');
-  const command = document.querySelector('#standing-command');
-  const list = document.querySelector('#standing-list');
-  title.textContent = 'Standing approvals';
-  details.textContent = 'Ask your agent to call maintenance_connection and share its OAuth connection ID. A standing approval allows that connection to run an exact diagnostic on one paired host.';
-  function options(select, entries) {
-    const previous = select.value;
-    select.replaceChildren(...entries.map(([value, label]) => new Option(label, value)));
-    if (entries.some(([value]) => value === previous)) select.value = previous;
+  const clientSelect = document.querySelector('#standing-client');
+  const hostSelect = document.querySelector('#standing-host');
+  const commandSelect = document.querySelector('#standing-command');
+  const addRule = document.querySelector('#add-rule');
+  const save = form.querySelector('[type="submit"]');
+  const cancel = document.querySelector('#cancel-rule');
+  let editing;
+
+  const diagnostics = {
+    uptime: 'System uptime',
+    'df -h /srv/techleaddocker': 'Docker storage usage',
+  };
+  const hostName = host => host.name || host.address;
+  const clientLabel = client => client.name + ' · ' + client.id.slice(-6);
+  const clientDetail = client => 'OAuth · ' + client.callback + ' · ' + client.id.slice(-6);
+
+  function node(tag, text, className) {
+    const element = document.createElement(tag);
+    element.textContent = text;
+    if (className) element.className = className;
+    return element;
   }
-  async function loadRules() {
-    const { hosts, rules, commands } = await post('standing-rules', {});
-    panel.hidden = false;
-    action.hidden = true;
-    options(host, hosts.map(item => [item.address, item.name ? item.name + ' (' + item.address + ')' : item.address]));
-    options(command, commands.map(item => [item, item]));
-    form.querySelector('button').disabled = !hosts.length;
-    list.replaceChildren();
+
+  function identity(name, detail) {
+    const cell = node('td', '', 'admin-identity');
+    cell.append(node('strong', name));
+    if (detail) cell.append(node('small', detail));
+    return cell;
+  }
+
+  function pill(label, active) {
+    const badge = node('span', label, 'admin-pill');
+    badge.dataset.active = String(active);
+    return badge;
+  }
+
+  function rowButton(label, target, callback) {
+    const button = node('button', label, 'secondary');
+    button.type = 'button';
+    button.setAttribute('aria-label', label + ' · ' + target);
+    button.onclick = callback;
+    return button;
+  }
+
+  function row(parent, ...contents) {
+    const item = node('tr', '');
+    for (const content of contents) {
+      if (content?.tagName === 'TD') item.append(content);
+      else {
+        const cell = node('td', typeof content === 'string' ? content : '');
+        if (content && typeof content !== 'string') cell.append(content);
+        item.append(cell);
+      }
+    }
+    parent.append(item);
+  }
+
+  function options(select, prompt, entries) {
+    select.replaceChildren(new Option(prompt, ''), ...entries.map(([value, label]) => new Option(label, value)));
+  }
+
+  function choose(select, value) {
+    select.value = [...select.options].some(option => option.value === value) ? value : '';
+  }
+
+  function showEditor({ grant, address, command, id } = {}) {
+    editing = id;
+    document.querySelector('#standing-form-title').textContent = id ? 'Edit standing approval' : 'Add standing approval';
+    choose(clientSelect, grant);
+    choose(hostSelect, address);
+    choose(commandSelect, command);
+    form.hidden = false;
+    status.textContent = '';
+    (clientSelect.value ? hostSelect.value ? commandSelect : hostSelect : clientSelect).focus();
+  }
+
+  function closeEditor() {
+    editing = undefined;
+    form.hidden = true;
+    addRule.focus();
+  }
+
+  function showTable(name, hasRows) {
+    document.querySelector('#' + name + '-table').hidden = !hasRows;
+    document.querySelector('#' + name + '-empty').hidden = hasRows;
+  }
+
+  async function loadDashboard() {
+    const { clients, hosts, rules, commands, sharedBearerConfigured } = await post('standing-rules', {});
+    const activeClients = clients.filter(client => client.active);
+    const eligibleHosts = hosts.filter(host => host.state === 'ready');
+    const canAddRule = activeClients.length > 0 && eligibleHosts.length > 0;
+    const clientRows = document.querySelector('#client-rows');
+    const hostRows = document.querySelector('#host-rows');
+    const ruleRows = document.querySelector('#standing-list');
+    options(clientSelect, 'Select a connection', activeClients.map(client => [client.id, clientLabel(client)]));
+    options(hostSelect, 'Select a host', eligibleHosts.map(host => [
+      host.address, host.name ? host.name + ' (' + host.address + ')' : host.address,
+    ]));
+    options(commandSelect, 'Select a diagnostic', commands.map(command => [command, diagnostics[command] + ' (' + command + ')']));
+    addRule.disabled = !canAddRule;
+    const emptyRules = document.querySelector('#rules-empty');
+    emptyRules.textContent = canAddRule ? 'No standing approvals yet.' : activeClients.length
+      ? 'Pair a host with command access to create a rule.' : 'Connect an MCP client through OAuth to create a rule.';
+    clientRows.replaceChildren();
+    for (const client of clients) {
+      row(clientRows, identity(client.name, clientDetail(client)), pill(client.active ? 'Authorized' : 'Expired', client.active),
+        client.active && canAddRule ? rowButton('Add rule', clientLabel(client), () => showEditor({ grant: client.id })) : null);
+    }
+    if (sharedBearerConfigured) {
+      row(clientRows, identity('Shared bearer access', 'Bearer token'), pill('Approval required', false), null);
+    }
+    const emptyClients = document.querySelector('#clients-empty');
+    emptyClients.textContent = sharedBearerConfigured ? 'No OAuth connections recorded yet. Connect PaSTA from your MCP client and make a request.' : emptyClients.textContent;
+    showTable('clients', clients.length > 0 || sharedBearerConfigured);
+    emptyClients.hidden = clients.length > 0;
+
+    hostRows.replaceChildren();
+    for (const host of hosts) {
+      const ready = host.state === 'ready';
+      const access = ready ? 'Rule eligible' : host.state === 'removing' ? 'Removal pending' : 'Approval only';
+      row(hostRows, identity(hostName(host), host.name ? host.address : ''), node('code', host.account), pill(access, ready),
+        ready && canAddRule ? rowButton('Add rule', hostName(host), () => showEditor({ address: host.address })) : null);
+    }
+    showTable('hosts', hosts.length > 0);
+
+    ruleRows.replaceChildren();
     for (const rule of rules) {
-      const item = document.createElement('li');
-      const text = document.createElement('span');
-      text.textContent = rule.address + ' · ' + rule.command + ' · ' + rule.grant;
-      const remove = document.createElement('button');
-      remove.className = 'secondary';
-      remove.type = 'button';
-      remove.textContent = 'Revoke';
-      remove.onclick = async () => {
-        remove.disabled = true;
+      const client = clients.find(item => item.id === rule.grant);
+      const host = hosts.find(item => item.address === rule.address);
+      const controls = node('span', '', 'admin-actions');
+      const label = (client ? clientLabel(client) : 'unlisted connection') + ' on ' + (host ? hostName(host) : rule.address) + ' · ' + rule.command;
+      if (canAddRule) controls.append(rowButton('Edit', label, () => showEditor(rule)));
+      controls.append(rowButton('Revoke', label, async event => {
+        const button = event.currentTarget;
+        button.disabled = true;
         try {
           await post('remove-standing-rule', { id: rule.id });
-          await loadRules();
+          if (editing === rule.id) closeEditor();
+          await loadDashboard();
           reviewStatus('success', 'Standing approval revoked.');
         } catch {
-          remove.disabled = false;
-          reviewStatus('error', 'Could not revoke the standing approval.');
+          button.disabled = false;
+          reviewStatus('error', 'Could not revoke the standing approval. Refresh and check the rule.');
         }
-      };
-      item.append(text, remove);
-      list.append(item);
+      }));
+      row(ruleRows, identity(client?.name ?? 'Unlisted connection', client ? clientDetail(client) : rule.grant.slice(-6)),
+        identity(host ? hostName(host) : rule.address, host?.name ? rule.address : ''),
+        node('code', rule.command), pill(rule.available ? 'Active' : 'Unavailable', rule.available), controls);
     }
+    showTable('rules', rules.length > 0);
+
+    details.textContent = 'Manage MCP clients, SSH hosts, and the diagnostics each connection can run.';
+    document.querySelector('#admin-nav').hidden = false;
+    dashboard.hidden = false;
+    action.hidden = true;
   }
+
+  addRule.onclick = () => showEditor();
+  cancel.onclick = closeEditor;
   form.onsubmit = async event => {
     event.preventDefault();
-    const submit = form.querySelector('button');
-    submit.disabled = true;
+    save.disabled = true;
     try {
-      await post('add-standing-rule', { grant: client.value.trim(), address: host.value, command: command.value });
-      await loadRules();
+      await post('add-standing-rule', {
+        grant: clientSelect.value, address: hostSelect.value, command: commandSelect.value, id: editing,
+      });
+      await loadDashboard();
+      closeEditor();
       reviewStatus('success', 'Standing approval saved.');
     } catch {
-      submit.disabled = false;
-      reviewStatus('error', 'Could not save the standing approval.');
+      reviewStatus('error', 'Could not save the rule. Check that the connection and host are still available and the rule is unique.');
+    } finally {
+      save.disabled = false;
     }
   };
-  void loadRules().catch(() => {
-    bind('Sign in with passkey', async () => {
-      const { id, options: optionsJSON } = await post('sign-in-options', {});
-      const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
-      await post('sign-in', { id, response });
-      await loadRules();
-    }, 'Sign-in did not complete. Try again.');
-  });
+
+  try {
+    await loadDashboard();
+  } catch (error) {
+    action.hidden = false;
+    if (error.status === 403) {
+      details.textContent = 'Sign in with your owner passkey to manage connections and standing approvals.';
+      bind('Sign in with passkey', async () => {
+        const { id, options: optionsJSON } = await post('sign-in-options', {});
+        const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
+        await post('sign-in', { id, response });
+        await loadDashboard();
+      }, 'Sign-in did not complete. Try again.');
+    } else {
+      details.textContent = 'PaSTA could not load the dashboard.';
+      bind('Retry', startAdmin, 'PaSTA could not load the dashboard. Try again.');
+    }
+  }
+}
+
+if (location.pathname.endsWith('/admin')) {
+  void startAdmin();
 } else if (location.pathname.endsWith('/onboard')) {
   showStep('access');
   title.textContent = 'Set up maintenance access';
