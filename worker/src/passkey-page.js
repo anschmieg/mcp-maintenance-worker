@@ -375,7 +375,73 @@ function hostSetup(token) {
   });
 }
 
-if (location.pathname.endsWith('/onboard')) {
+if (location.pathname.endsWith('/admin')) {
+  const panel = document.querySelector('#standing-rules');
+  const form = document.querySelector('#standing-form');
+  const client = document.querySelector('#standing-client');
+  const host = document.querySelector('#standing-host');
+  const command = document.querySelector('#standing-command');
+  const list = document.querySelector('#standing-list');
+  title.textContent = 'Standing approvals';
+  details.textContent = 'Ask your agent to call maintenance_connection and share its OAuth connection ID. A standing approval allows that connection to run an exact diagnostic on one paired host.';
+  function options(select, entries) {
+    const previous = select.value;
+    select.replaceChildren(...entries.map(([value, label]) => new Option(label, value)));
+    if (entries.some(([value]) => value === previous)) select.value = previous;
+  }
+  async function loadRules() {
+    const { hosts, rules, commands } = await post('standing-rules', {});
+    panel.hidden = false;
+    action.hidden = true;
+    options(host, hosts.map(item => [item.address, item.name ? item.name + ' (' + item.address + ')' : item.address]));
+    options(command, commands.map(item => [item, item]));
+    form.querySelector('button').disabled = !hosts.length;
+    list.replaceChildren();
+    for (const rule of rules) {
+      const item = document.createElement('li');
+      const text = document.createElement('span');
+      text.textContent = rule.address + ' · ' + rule.command + ' · ' + rule.grant;
+      const remove = document.createElement('button');
+      remove.className = 'secondary';
+      remove.type = 'button';
+      remove.textContent = 'Revoke';
+      remove.onclick = async () => {
+        remove.disabled = true;
+        try {
+          await post('remove-standing-rule', { id: rule.id });
+          await loadRules();
+          reviewStatus('success', 'Standing approval revoked.');
+        } catch {
+          remove.disabled = false;
+          reviewStatus('error', 'Could not revoke the standing approval.');
+        }
+      };
+      item.append(text, remove);
+      list.append(item);
+    }
+  }
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const submit = form.querySelector('button');
+    submit.disabled = true;
+    try {
+      await post('add-standing-rule', { grant: client.value.trim(), address: host.value, command: command.value });
+      await loadRules();
+      reviewStatus('success', 'Standing approval saved.');
+    } catch {
+      submit.disabled = false;
+      reviewStatus('error', 'Could not save the standing approval.');
+    }
+  };
+  void loadRules().catch(() => {
+    bind('Sign in with passkey', async () => {
+      const { id, options: optionsJSON } = await post('sign-in-options', {});
+      const response = await SimpleWebAuthnBrowser.startAuthentication({ optionsJSON });
+      await post('sign-in', { id, response });
+      await loadRules();
+    }, 'Sign-in did not complete. Try again.');
+  });
+} else if (location.pathname.endsWith('/onboard')) {
   showStep('access');
   title.textContent = 'Set up maintenance access';
   details.textContent = 'Checking whether your owner passkey is registered…';

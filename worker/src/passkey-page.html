@@ -86,6 +86,19 @@
       <textarea id="script-preview" rows="12" readonly aria-label="Host setup script"></textarea>
     </details>
   </section>
+  <section id="standing-rules" hidden>
+    <form id="standing-form" class="panel">
+      <label for="standing-client">OAuth connection ID</label>
+      <input id="standing-client" required minlength="43" maxlength="43" autocomplete="off">
+      <label for="standing-host">Host</label>
+      <select id="standing-host" required></select>
+      <label for="standing-command">Diagnostic</label>
+      <select id="standing-command" required></select>
+      <button type="submit">Add standing approval</button>
+    </form>
+    <h2>Standing approvals</h2>
+    <ul id="standing-list"></ul>
+  </section>
   <div class="actions">
     <button id="action" type="button" disabled>Continue</button>
     <button id="cancel-waiting" class="secondary" type="button" hidden>Cancel setup</button>

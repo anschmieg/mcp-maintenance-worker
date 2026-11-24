@@ -23,6 +23,9 @@ try:
     command = consume(sys.stdin.read(24001), key, used, enrollment=enrollment, host=host, account=account)
 except (OSError, ValueError, KeyError):
     sys.exit(126)
+if command == "uptime":
+    print("fixture uptime")
+    sys.exit(0)
 if not re.fullmatch(r"printf '%s' 'pasta-dynamic-[a-f0-9-]+'(?:; exit 7)?", command):
     sys.exit(126)
 os.execl("/bin/bash", "bash", "--noprofile", "--norc", "-c", command)

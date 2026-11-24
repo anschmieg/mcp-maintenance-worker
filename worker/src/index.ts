@@ -5,11 +5,13 @@ import { classify } from './classify';
 import { assessCommand } from './assessment';
 import { TimingProbe } from './timing';
 import { approvalStore, passkeyOrigin, passkeyRoute } from './passkeys';
-import { acceptsOAuth, oauthRoute, oauthUnauthorized, type OAuthEnv } from './oauth';
+import { authenticatedOAuthGrant, oauthRoute, oauthUnauthorized, type OAuthEnv } from './oauth';
 export { OAuthGrant } from './oauth';
 export { TimingProbe };
 export { PasskeyApproval } from './passkeys';
 type Env = OAuthEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
+
+const grantHeader = 'x-pasta-verified-oauth-grant';
 
 const approvalInstructions = 'When a PaSTA tool returns review_url, immediately give the user that exact URL as a clickable approval link in chat. Wait for the owner to approve, then use passkey_test_status with the original job_id to check the result. A pending request has not run.';
 
@@ -42,13 +44,27 @@ export class MaintenanceAgent extends McpAgent<Env> {
         description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. ' + approvalInstructions,
         inputSchema: { ...jobSchema, host: z.string().optional() },
       }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
+      this.server.registerTool('maintenance_connection', {
+        description: 'Show the authenticated OAuth connection ID for configuring standing rules in PaSTA.',
+        inputSchema: {},
+      }, async (_args, extra) => {
+        const grant = extra.requestInfo?.headers[grantHeader];
+        return result({
+          connection_id: typeof grant === 'string' ? grant : null,
+          admin_url: new URL('/passkeys/admin', passkeyOrigin(this.env)!).href,
+          executed: false,
+        });
+      });
       this.server.registerTool('request_maintenance_command', {
-        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. ' + approvalInstructions,
+        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. If a standing approval applies, use passkey_test_status to check an in-progress job. ' + approvalInstructions,
         inputSchema: z.strictObject({ ...jobSchema, host: z.string(), command: z.string().max(4096),
           statement: z.string().trim().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
         }),
-      }, async ({ job_id, host, command, statement }) =>
-        result(await approvalStore(this.env).requestCommand(job_id, host, command, statement)));
+      }, async ({ job_id, host, command, statement }, extra) => {
+        const grant = extra.requestInfo?.headers[grantHeader];
+        return result(await approvalStore(this.env).requestCommand(job_id, host, command, statement,
+          typeof grant === 'string' ? grant : undefined));
+      });
       this.server.registerTool('request_service_restart', {
         description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. ' + approvalInstructions,
         inputSchema: z.strictObject({ ...jobSchema, host: z.string() }),
@@ -112,7 +128,7 @@ export default {
     if (!auth?.startsWith('Bearer ')) return oauthUnauthorized(env);
     const bearer = auth.slice(7);
     const oauthToken = path === '/mcp' && new URL(request.url).origin === passkeyOrigin(env)?.origin &&
-      await acceptsOAuth(env, bearer);
+      await authenticatedOAuthGrant(env, bearer);
     if (!oauthToken) {
       if (bearer.length !== token.length) return oauthUnauthorized(env);
       const enc=new TextEncoder();
@@ -137,6 +153,8 @@ export default {
     // Do not pass the ingress access secret into the session object.
     const headers=new Headers(request.headers);
     headers.delete('Authorization');
+    headers.delete(grantHeader);
+    if (typeof oauthToken === 'string') headers.set(grantHeader, oauthToken);
     return transport.fetch(new Request(request,{headers}),env,ctx);
   },
 };

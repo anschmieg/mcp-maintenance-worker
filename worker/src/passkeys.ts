@@ -20,6 +20,13 @@ const lifetime = 5 * 60_000;
 const approvalLifetime = 15 * 60_000;
 const prefix = '/passkeys';
 const empty = { executed: false };
+const standingCommands = ['uptime', 'df -h /srv/techleaddocker'] as const;
+type StandingCommand = typeof standingCommands[number];
+type StandingRule = { id: string; grant: string; address: string; enrollment: string; command: StandingCommand };
+const validGrant = /^[A-Za-z0-9_-]{43}$/u;
+function standingCommand(value: unknown): value is StandingCommand {
+  return standingCommands.some(command => command === value);
+}
 const diagnostic = { host: 'ams', operation: 'openbot-enrollment-check-v1', execution_identity: maintenanceAccount, dry_run: true } as const;
 const hostCheck = { ...diagnostic, operation: 'run openbot-enrollment-check-v1 to verify SSH enrollment', dry_run: false } as const;
 const commandCheck = 'echo ' + enrollmentMarker;
@@ -44,6 +51,7 @@ type Job = {
   scope?: string;
   approved_at?: number;
   execution_owner?: string;
+  standing_rule?: string;
   retry_lock?: string;
   reconciled_at?: number;
   host_verification?: HostVerification;
@@ -632,14 +640,14 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     return pair.addressName?.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').trim().slice(0, 160) || undefined;
   }
 
-  async requestCommand(jobId: string, address: string, command: string, statement: string) {
+  async requestCommand(jobId: string, address: string, command: string, statement: string, grant?: string) {
     const parser = await classify(command).catch(() => undefined);
     if (!parser) return { state: 'command_validation_unavailable', ...empty };
     if (parser.decision === 'invalid') return { state: 'invalid_command', reason: parser.reason, ...empty };
-    return this.start(jobId, true, address, command === commandRestart, command, statement, parser);
+    return this.start(jobId, true, address, command === commandRestart, command, statement, parser, grant);
   }
 
-  async start(jobId: string, enrollment = false, address?: string, restart = false, command?: string, statement?: string, parser?: Awaited<ReturnType<typeof classify>>) {
+  async start(jobId: string, enrollment = false, address?: string, restart = false, command?: string, statement?: string, parser?: Awaited<ReturnType<typeof classify>>, grant?: string) {
     const origin = passkeyOrigin(this.env)!;
     const credential = await this.#credential();
     if (!credential) return { state: 'enrollment_required', ...empty };
@@ -680,17 +688,36 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         ? await assessScope(this.env.AI, command, { screening_reason: parser.reason, syntax_facts: parser.syntax_facts })
         : scopeUnavailable;
     }
+    const canUseRule = grant && validGrant.test(grant) && parser?.decision === 'auto_candidate' &&
+      standingCommand(command) && host?.signedApproval && host.commandExecution && host.enrollmentId;
+    let standingAccepted = false;
     const matches = await this.ctx.storage.transaction(async tx => {
+      standingAccepted = false;
       const existing = await tx.get<Job>(key);
       if (existing) return existing.command === command && existing.statement === statement && existing.target.operation === target.operation &&
         existing.target.host === target.host && (target.dry_run || (!existing.target.dry_run &&
           existing.target.fingerprint === target.fingerprint && existing.target.execution_identity === target.execution_identity && existing.target.enrollmentId === target.enrollmentId &&
           Boolean(existing.target.commandExecution) === Boolean(target.commandExecution) &&
           Boolean(existing.target.signedApproval) === Boolean(target.signedApproval)));
-      await tx.put<Job>(key, { target, options, ...(command ? { command, statement, hostName, scope } : {}), expires_at: Date.now() + this.#jobLifetime() });
+      const job: Job = { target, options, ...(command ? { command, statement, hostName, scope } : {}),
+        expires_at: Date.now() + this.#jobLifetime() };
+      if (canUseRule && host && !await tx.get('removing-host:' + host.address) &&
+          sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host)) {
+        const rules = await tx.list<StandingRule>({ prefix: 'standing-rule:' });
+        const rule = [...rules.values()].find(item =>
+          item.grant === grant && item.address === host.address && item.enrollment === host.enrollmentId && item.command === command);
+        const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, target.execution_identity, command]));
+        if (rule && !await tx.get(retryLock)) {
+          await tx.put(retryLock, key);
+          Object.assign(job, { approved_at: Date.now(), execution_owner: this.#executionOwner, standing_rule: rule.id, retry_lock: retryLock });
+          standingAccepted = true;
+        }
+      }
+      await tx.put<Job>(key, job);
       return true;
     });
     if (!matches) return { state: 'job_id_in_use', ...empty };
+    if (standingAccepted && host) this.ctx.waitUntil(this.#verifyHost(key, host, target.operation, command));
     return this.status(jobId);
   }
 
@@ -765,6 +792,7 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         review_url: new URL(prefix + '/review?job=' + encodeURIComponent(jobId), origin).href,
       } : {}),
       approved_at: job.approved_at ?? null,
+      ...(job.standing_rule ? { approval_source: 'standing_rule', standing_rule: job.standing_rule } : {}),
       can_reconcile: Boolean(job.retry_lock && !job.reconciled_at && (hostResult ?
         hostResult.executed === null : job.approved_at && Date.now() >= job.approved_at + lifetime)),
     };
@@ -792,6 +820,40 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
       if (result && 'host' in result && result.host === address) return result;
     }
     return { host: address ?? hostCheck.host, state: this.env.HOST_PROBE ? 'awaiting_check' : 'unconfigured', ...empty };
+  }
+
+  async standingRules(token: unknown) {
+    if (!await this.#ownerAuthorized(token)) return null;
+    const rules = await this.ctx.storage.list<StandingRule>({ prefix: 'standing-rule:' });
+    const enrolled = await this.ctx.storage.list<Host>({ prefix: 'onboarding-host:' });
+    const hosts = await Promise.all([...enrolled.values()]
+      .filter(host => host.signedApproval && host.commandExecution && host.enrollmentId)
+      .map(async host => ({
+        address: host.address,
+        name: await this.#pairedHostName(host.address, host.fingerprint, host.enrollmentId),
+      })));
+    return { hosts, rules: [...rules.values()], commands: standingCommands };
+  }
+
+  async addStandingRule(token: unknown, grant: unknown, address: unknown, command: unknown) {
+    if (!await this.#ownerAuthorized(token) || typeof grant !== 'string' || !validGrant.test(grant) ||
+        typeof address !== 'string' || !validTailnetIpv4(address) || !standingCommand(command)) return false;
+    return this.ctx.storage.transaction(async tx => {
+      const host = await tx.get<Host>('onboarding-host:' + address);
+      if (!host?.enrollmentId || !host.signedApproval || !host.commandExecution || await tx.get('removing-host:' + address)) return false;
+      const existing = await tx.list<StandingRule>({ prefix: 'standing-rule:' });
+      if ([...existing.values()].some(rule => rule.grant === grant && rule.address === address &&
+          rule.enrollment === host.enrollmentId && rule.command === command)) return true;
+      if (existing.size >= 64) return false;
+      const id = crypto.randomUUID();
+      await tx.put<StandingRule>('standing-rule:' + id, { id, grant, address, enrollment: host.enrollmentId, command });
+      return true;
+    });
+  }
+
+  async removeStandingRule(token: unknown, id: unknown) {
+    if (!await this.#ownerAuthorized(token) || typeof id !== 'string' || !uuid.test(id)) return false;
+    return this.ctx.storage.delete('standing-rule:' + id);
   }
 
   async reviewAvailability(jobId: string) {
@@ -946,7 +1008,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (path === '/style.css') {
       return new Response(approvalStyles, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
     }
-    if (path === '/onboard' || path === '/review') {
+    if (path === '/onboard' || path === '/review' || path === '/admin') {
       return new Response(approvalPage, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
     }
     if (path === '/webauthn.js') {
@@ -999,6 +1061,17 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     if (body.job === undefined) return reply({ signedIn });
     if (typeof body.job !== 'string' || !uuid.test(body.job)) return reject(400);
     return reply({ signedIn, availability: await store.reviewAvailability(body.job) });
+  }
+  if (path === '/standing-rules') {
+    const rules = await store.standingRules(sessionCookie);
+    return rules ? reply(rules) : reject(403);
+  }
+  if (path === '/add-standing-rule') {
+    return await store.addStandingRule(sessionCookie, body.grant, body.address, body.command)
+      ? reply({ saved: true }) : reject(403);
+  }
+  if (path === '/remove-standing-rule') {
+    return await store.removeStandingRule(sessionCookie, body.id) ? reply({ removed: true }) : reject(403);
   }
   if (path === '/owner-state') return reply(await store.ownerState());
   if (path === '/sign-in-options') {

@@ -108,10 +108,10 @@ export function oauthUnauthorized(env: OAuthEnv) {
     : noCache });
 }
 
-export async function acceptsOAuth(env: OAuthEnv, token: string) {
+export async function authenticatedOAuthGrant(env: OAuthEnv, token: string) {
   const settings = config(env);
   const parsed = parts(token);
-  return Boolean(settings && parsed && await store(env, parsed.id).accepts(settings.resource, parsed.secretPart));
+  if (settings && parsed && await store(env, parsed.id).accepts(settings.resource, parsed.secretPart)) return parsed.id;
 }
 
 export async function oauthRoute(request: Request, env: OAuthEnv) {

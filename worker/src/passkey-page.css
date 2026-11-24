@@ -148,6 +148,11 @@ code { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
 #review-command th span { display: inline-block; width: calc(100% - 1.5rem); }
 #review-command svg { vertical-align: top; margin: .05rem .375rem 0 0; }
 #review-command td { overflow-wrap: anywhere; }
+#standing-form { display: grid; gap: .6rem; margin-top: 1rem; }
+#standing-form select { color: inherit; background: transparent; padding: .6rem; border: 1px solid var(--line); border-radius: .5rem; }
+#standing-list { list-style: none; padding: 0; }
+#standing-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem; margin: .6rem 0; }
+#standing-list li span { overflow-wrap: anywhere; }
 .actions:not(:has(> :not([hidden]))) { display: none; }
 @media (max-width: 36rem) {
   body { background: #fff; }

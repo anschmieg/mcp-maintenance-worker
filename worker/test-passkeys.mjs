@@ -21,11 +21,11 @@ async function post(path, body, requestOrigin = origin) {
   });
 }
 
-async function call(name, job_id, host, command, statement, statementToken) {
+async function call(name, job_id, host, command, statement, statementToken, headers = {}) {
   const client = new Client({ name: 'passkey-integration-test', version: '1' });
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL('/mcp', origin), {
-      requestInit: { headers: { Authorization: 'Bearer ' + (statementToken ?? mcpToken) } },
+      requestInit: { headers: { ...headers, Authorization: 'Bearer ' + (statementToken ?? mcpToken) } },
     }), { timeout: 8000 });
     const result = await client.callTool({ name, arguments: { ...(job_id ? { job_id } : {}), ...(host ? { host } : {}), ...(command === undefined ? {} : { command, statement }) } });
     assert.ok(!result.isError, JSON.stringify(result));
@@ -210,7 +210,12 @@ const renewed = await tokenRequest(refresh);
 assert.equal(renewed.status, 200);
 assert.equal((await tokenRequest(refresh)).status, 400);
 assert.equal((await fetch(resource, { headers: { Authorization: 'Bearer ' + access_token } })).status, 401);
-assert.equal((await call('passkey_test_status', oauthJob, undefined, undefined, undefined, (await renewed.json()).access_token)).executed, false);
+const renewedToken = (await renewed.json()).access_token;
+assert.equal((await call('passkey_test_status', oauthJob, undefined, undefined, undefined, renewedToken)).executed, false);
+const connection = await call('maintenance_connection', undefined, undefined, undefined, undefined, renewedToken);
+assert.equal(connection.connection_id, transaction);
+assert.equal((await call('maintenance_connection', undefined, undefined, undefined, undefined, mcpToken,
+  { 'x-pasta-verified-oauth-grant': transaction })).connection_id, null);
 console.log('PASS: OAuth discovery, owner passkey, PKCE, single-use exchange, refresh, and MCP authorization');
 
 assert.equal((await post('prepare-host', { token: mcpToken })).status, 403);
@@ -624,6 +629,36 @@ for (let retry = 0; retry < 60; retry++) {
 assert.equal((await call('passkey_test_status', existingRestart)).state, 'service_restarted');
 assert.equal((await (await fetch(fixture + '/attempts')).json()).restarts, initialRestarts + 1);
 console.log('PASS: selected existing account is bound to SSH and a fresh one-time restart approval');
+
+assert.equal((await post('standing-rules', {})).status, 403);
+assert.equal((await post('add-standing-rule', { grant: transaction, address: detectedAddress, command: 'uptime' })).status, 403);
+assert.equal((await cookieRequest('add-standing-rule', { grant: transaction, address: detectedAddress, command: 'cat /etc/passwd' })).status, 403);
+assert.equal((await cookieRequest('add-standing-rule', { grant: transaction, address: detectedAddress, command: 'uptime' })).status, 200);
+const policy = await (await cookieRequest('standing-rules', {})).json();
+assert.equal(policy.rules.length, 1);
+const rationale = 'Check the host uptime.';
+const standingRequest = (id, host, command, token = renewedToken, headers) =>
+  call('request_maintenance_command', id, host, command, rationale, token, headers);
+assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime', mcpToken,
+  { 'x-pasta-verified-oauth-grant': transaction })).state, 'pending');
+assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime; true')).state, 'pending');
+assert.equal((await standingRequest(randomUUID(), address, 'uptime')).state, 'pending');
+const autoJob = randomUUID();
+const attemptsBeforePolicy = await attempts();
+let autoResult = await standingRequest(autoJob, detectedAddress, 'uptime');
+assert.equal(autoResult.approval_source, 'standing_rule');
+assert.equal(autoResult.review_url, undefined);
+for (let retry = 0; autoResult.state === 'checking_host' && retry < 40; retry++) {
+  await new Promise(resolve => setTimeout(resolve, 100));
+  autoResult = await call('passkey_test_status', autoJob);
+}
+assert.equal(autoResult.state, 'command_completed');
+assert.match(autoResult.stdout, /fixture uptime/u);
+assert.deepEqual(await standingRequest(autoJob, detectedAddress, 'uptime'), autoResult);
+assert.equal(await attempts(), attemptsBeforePolicy + 1);
+assert.equal((await cookieRequest('remove-standing-rule', { id: policy.rules[0].id })).status, 200);
+assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime')).state, 'pending');
+console.log('PASS: an exact, host-bound standing approval applies only to the verified OAuth connection and can be revoked');
 
 const commandJob = randomUUID();
 const expectedOutput = 'pasta-dynamic-' + randomUUID();

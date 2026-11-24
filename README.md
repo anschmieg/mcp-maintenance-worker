@@ -118,6 +118,12 @@ The installer restricts the OpenSSH key to the PaSTA forced command and disables
 
 Existing enrollments keep their fixed operations. To enable request-time commands on an existing host, remove its enrollment and old authorized key, then run the current pairing wizard. If the result of a command is unknown, check the host before retrying.
 
+### Standing approvals
+
+The owner can grant and revoke standing approvals at `/passkeys/admin`. Ask the MCP client to call `maintenance_connection` for its OAuth connection ID, then select that ID, a paired host, and a diagnostic. Agents that share an OpenBot OAuth connection share its rules. OAuth refresh preserves the connection ID. A newly authorized connection has a new ID.
+
+The form supports the exact commands `uptime` and `df -h /srv/techleaddocker`. PaSTA matches the verified OAuth connection, the current host enrollment, and the exact command before authorizing a single job. Other valid requests follow the normal passkey review flow. Use `passkey_test_status` to check the job outcome and see whether a standing rule authorized it.
+
 ### Optional tagged enrollment
 
 Before starting device sign-in, select **Set up a restricted Tailscale identity**. The wizard guides a tailnet administrator through adding `tag:openbot-probe` and creating an OAuth client with **Auth Keys Write** for that tag. Paste the credential into the wizard once. The Worker uses it to create a single-use tagged key and then discards the OAuth credential. Allow the tag to reach the intended hosts on `tcp:22` so PaSTA can discover and verify them. Check whether existing broader grants also apply to the tag. Operator-configured enrollment credentials still take precedence on a fresh installation. [Tailscale OAuth clients](https://tailscale.com/docs/features/oauth-clients) · [How grants combine](https://tailscale.com/docs/features/access-control/grants/grants-explained)
