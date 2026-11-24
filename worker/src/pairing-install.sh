@@ -15,6 +15,22 @@ as_admin() {
   fi
 }
 
+install_generated_file() {
+  as_admin /bin/sh -c '
+    set -eu
+    target=$1
+    temporary=$(mktemp -- "${target%/*}/.pasta-install.XXXXXX")
+    trap '\''rm -f -- "$temporary"'\'' EXIT
+    cat > "$temporary"
+    test -s "$temporary"
+    chmod "$2" "$temporary"
+    if [ "${3:-}" = sudoers ]; then
+      /usr/sbin/visudo -c -f "$temporary" >/dev/null
+    fi
+    mv -fT -- "$temporary" "$target"
+  ' pasta-install "$@"
+}
+
 root_owned_ssh_path() {
   as_admin test ! -L "$1" || return 1
   case "$(as_admin stat -c '%u:%a' -- "$1")" in
@@ -320,15 +336,14 @@ This key only allows the pairing check and fixed service restart."
     fi
     if ! as_admin install -d -m 0755 /usr/local/libexec ||
        ! as_admin install -d -m 0700 "$gate_dir" "$gate_dir/used" ||
-       ! printf '%s\n' "$approval_gate" | as_admin install -m 0644 /dev/stdin /usr/local/libexec/pasta-approval.py ||
-       ! printf '%s\n' "$approval_public_key" | as_admin install -m 0600 /dev/stdin "$gate_dir/public.pem" ||
-       ! printf '%s\n' "$approval_target" | as_admin install -m 0600 /dev/stdin "$gate_dir/target.json"; then
+       ! printf '%s\n' "$approval_gate" | install_generated_file /usr/local/libexec/pasta-approval.py 0644 ||
+       ! printf '%s\n' "$approval_public_key" | install_generated_file "$gate_dir/public.pem" 0600 ||
+       ! printf '%s\n' "$approval_target" | install_generated_file "$gate_dir/target.json" 0600; then
       note 'Could not install the approval verifier.'
       return 1
     fi
     sudo_rule="$account ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/local/libexec/pasta-approval.py"
-    if ! printf '%s\n' "$sudo_rule" | as_admin /usr/sbin/visudo -c -f - >/dev/null ||
-       ! printf '%s\n' "$sudo_rule" | as_admin install -m 0440 /dev/stdin "/etc/sudoers.d/pasta-approval-$(printf %s "$account" | tr . _)"; then
+    if ! printf '%s\n' "$sudo_rule" | install_generated_file "/etc/sudoers.d/pasta-approval-$(printf %s "$account" | tr . _)" 0440 sudoers; then
       note 'Could not configure the approval verifier in sudo.'
       return 1
     fi
