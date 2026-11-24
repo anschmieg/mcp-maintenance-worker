@@ -1,6 +1,7 @@
 /maintenance-poc
 /worker/src/screen.wasm
 /worker/src/wasm_exec.js
+/worker/src/passkey-browser.txt
 /worker/node_modules/
 /worker/.wrangler/
 /worker/.dev.vars*
@@ -11,3 +12,4 @@
 /experiments/tailnet/.wrangler/
 /experiments/tailnet/.dev.vars*
 /experiments/tailnet/.env*
+/.wrangler/

@@ -1,0 +1,23 @@
+--- a/go/main.go
++++ b/go/main.go
+@@ -702,6 +702,20 @@
+ 		st["name"] = strings.TrimSuffix(nm.SelfName(), ".")
+ 		st["addrs"] = addrs
+ 		st["peers"] = len(nm.Peers)
++		var visibleDevices []map[string]string
++		for _, peer := range nm.Peers {
++			for _, prefix := range peer.Addresses().All() {
++				address := prefix.Addr()
++				if address.Is4() {
++					visibleDevices = append(visibleDevices, map[string]string{
++						"name": strings.TrimSuffix(peer.Name(), "."),
++						"address": address.String(),
++					})
++					break
++				}
++			}
++		}
++		st["visibleDevices"] = visibleDevices
+ 	}
+ 	return jsonValue(st)
+ }

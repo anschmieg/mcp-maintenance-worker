@@ -1,0 +1,6 @@
+{
+  "name": "maintenance-enrollment-test-probe",
+  "main": "test-host-probe.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false
+}

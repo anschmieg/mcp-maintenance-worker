@@ -10,6 +10,7 @@ git -C "$scratch" init -q
 git -C "$scratch" fetch --depth=1 "$upstream" "$revision"
 git -C "$scratch" -c advice.detachedHead=false checkout -q FETCH_HEAD
 git -C "$scratch" submodule update --init --depth 1
+git -C "$scratch" apply "$PWD/visible-devices.patch"
 (cd "$scratch" && sh scripts/apply-patches.sh && sh scripts/build-wasm.sh)
 mkdir -p src
 cp "$scratch"/src/{index.js,wasm_exec.js,tailnet.wasm} src/

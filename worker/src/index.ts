@@ -1,36 +1,56 @@
 import { McpAgent } from 'agents/mcp';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import './wasm_exec.js';
-import module from './screen.wasm';
+import { classify } from './classify';
 import { assessCommand } from './assessment';
 import { TimingProbe } from './timing';
+import { approvalStore, passkeyOrigin, passkeyRoute, type PasskeyEnv } from './passkeys';
 export { TimingProbe };
-type Env = { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe>; AI?: Parameters<typeof assessCommand>[0] };
-
-let ready: Promise<void> | undefined;
-const g = globalThis as typeof globalThis & {
-  Go: new () => { importObject: WebAssembly.Imports; run(wasm: WebAssembly.Instance): Promise<void> };
-  maintenanceScreen?: (command: string) => { decision: string; reason: string; syntax_facts: string[] };
-};
-async function classify(command: string) {
-  if (new TextEncoder().encode(command).length > 4096) return {decision:'invalid',reason:'command exceeds 4096 bytes',syntax_facts:[]};
-  ready ??= (async () => {
-    const go = new g.Go();
-    const wasm = await WebAssembly.instantiate(module, go.importObject);
-    void go.run(wasm).then(() => { g.maintenanceScreen = undefined; }).catch(() => { g.maintenanceScreen = undefined; });
-    if (!g.maintenanceScreen) throw new Error('Wasm parser did not initialize');
-  })();
-  await ready;
-  if (!g.maintenanceScreen) throw new Error('Wasm parser unavailable');
-  return g.maintenanceScreen(command);
-}
+export { PasskeyApproval } from './passkeys';
+type Env = PasskeyEnv & { MCP_BEARER_TOKEN?:string; PROBES: DurableObjectNamespace<TimingProbe> };
 
 export class MaintenanceAgent extends McpAgent<Env> {
-  server = new McpServer({name:'maintenance-screening-poc',version:'0.6.0'});
+  server = new McpServer({name:'pasta',version:'0.6.0'});
   async init() {
     const probe_id=z.string().uuid();
     const output=(probe:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(probe)}],structuredContent:{probe,executed:false}});
+    if (passkeyOrigin(this.env)) {
+      const jobSchema = { job_id: z.string().uuid().toLowerCase() };
+      const result = (job: Record<string, unknown>) => ({
+        content: [{ type: 'text' as const, text: JSON.stringify(job) }], structuredContent: job,
+      });
+      this.server.registerTool('start_passkey_test', {
+        description: 'Create a dry-run approval for a fixed enrollment diagnostic. Show the owner the review URL. No host action runs.',
+        inputSchema: jobSchema,
+      }, async ({ job_id }) => result(await approvalStore(this.env).start(job_id)));
+      this.server.registerTool('passkey_test_status', {
+        description: 'Read the approval and execution result by its original job UUID.',
+        inputSchema: jobSchema,
+      }, async ({ job_id }) => result(await approvalStore(this.env).status(job_id)));
+      this.server.registerTool('start_host_enrollment', {
+        description: 'Request passkey approval to run the fixed openbot-enrollment-check-v1 SSH diagnostic for an enrolled host. Specify the Tailscale IPv4 when more than one host is enrolled. Show the owner the review URL.',
+        inputSchema: { ...jobSchema, host: z.string().optional() },
+      }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host)));
+      this.server.registerTool('request_maintenance_command', {
+        description: 'Request a passkey review of an exact Bash command on an enrolled host. Pass the Tailscale IPv4, a fresh job UUID, the literal command, and a short statement of why it is needed. The host must be paired for command execution. Keep secrets out of the command and statement because they are visible on the review page. Show the returned review URL to the owner.',
+        inputSchema: z.strictObject({ ...jobSchema, host: z.string(), command: z.string().max(4096),
+          statement: z.string().trim().min(1).max(240).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
+        }),
+      }, async ({ job_id, host, command, statement }) =>
+        result(await approvalStore(this.env).requestCommand(job_id, host, command, statement)));
+      this.server.registerTool('request_service_restart', {
+        description: 'Request one owner passkey approval to restart only openbot-maintenance-demo.service on the selected enrolled Linux host. Show the owner the review URL.',
+        inputSchema: z.strictObject({ ...jobSchema, host: z.string() }),
+      }, async ({ job_id, host }) => result(await approvalStore(this.env).start(job_id, true, host, true)));
+      this.server.registerTool('maintenance_host_status', {
+        description: 'Read the last completed SSH enrollment check, optionally for a specific enrolled host.',
+        inputSchema: { host: z.string().optional() },
+      }, async ({ host }) => result(await approvalStore(this.env).hostStatus(host)));
+      this.server.registerTool('maintenance_hosts', {
+        description: 'List enrolled host addresses for selecting an SSH enrollment check target.',
+        inputSchema: {},
+      }, async () => result(await approvalStore(this.env).listHosts()));
+    }
     this.server.registerTool('start_timing_probe',{
       description:'Schedule a no-op reliability probe. Use a fresh random UUID and reuse it if the call times out. No command is run.',
       inputSchema:{probe_id,delay_seconds:z.number().int().min(5).max(300)},
@@ -69,6 +89,11 @@ const transport=MaintenanceAgent.serve('/mcp');
 export default {
   async fetch(request:Request, env:Env, ctx:ExecutionContext) {
     const token=env.MCP_BEARER_TOKEN;
+    const path = new URL(request.url).pathname;
+    if (path.startsWith('/passkeys/') || path === '/setup') {
+      if (env.PASSKEY_SETUP_TOKEN && env.PASSKEY_SETUP_TOKEN === token) return new Response(null, { status: 503 });
+      return passkeyRoute(request, env);
+    }
     if (!token || token.length<32) return new Response('PoC token not configured',{status:503});
     const auth=request.headers.get('Authorization');
     if (!auth || !auth.startsWith('Bearer ') || auth.length!==token.length+7) return new Response('Unauthorized',{status:401});

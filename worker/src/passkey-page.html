@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaSTA</title>
+<link rel="stylesheet" href="/passkeys/style.css">
+<script src="/passkeys/browser.js" defer></script>
+</head>
+<body>
+<div class="shell">
+<header class="brand">
+  <span class="brand-mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m12 3 7 3v5c0 4-2.5 7.5-7 10-4.5-2.5-7-6-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/>
+    </svg>
+  </span>
+  <span>PaSTA</span>
+</header>
+<main class="card">
+  <ol class="steps" id="steps" aria-label="Setup progress" hidden>
+    <li data-step="access">1. Access</li>
+    <li data-step="tailnet">2. Tailscale</li>
+    <li data-step="host">3. Host</li>
+  </ol>
+  <h1 id="title">Maintenance approval</h1>
+  <p id="details" class="lead"></p>
+  <section id="command-display" aria-labelledby="command-label" hidden>
+    <h2 id="command-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l5 5-5 5m8 0h7"/></svg> Command</h2>
+    <code></code>
+  </section>
+  <table id="review-command" aria-label="Command details" hidden>
+    <tbody>
+      <tr>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v11H4z M9 21h6 M12 17v4"/></svg><span>Host</span></th>
+        <td>
+          <span data-review="host"></span>
+          <span data-review="run-as" hidden></span>
+        </td>
+      </tr>
+      <tr>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 11v5m0-8h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0"/></svg><span>Scope</span></th>
+        <td data-review="explanation"></td>
+      </tr>
+      <tr hidden>
+        <th scope="row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H4l1.5-4A8.5 8.5 0 1 1 21 11.5Z"/></svg><span>Reason</span></th>
+        <td data-review="statement"></td>
+      </tr>
+    </tbody>
+  </table>
+  <p id="review-deadline" class="hint" hidden></p>
+  <form id="setup" hidden>
+    <label for="token">Setup code</label>
+    <input id="token" name="token" type="password" autocomplete="off" required aria-describedby="setup-hint">
+    <p class="hint" id="setup-hint">Use the code you saved when setup was enabled.</p>
+  </form>
+  <a id="device-login" class="button" target="_blank" rel="noopener noreferrer" hidden>Open Tailscale sign-in</a>
+  <section id="tailnet-guide" class="panel" hidden>
+    <h2>One-time tailnet setup</h2>
+    <ol>
+      <li>In <a href="https://console.tailscale.com/admin/acls" target="_blank" rel="noopener noreferrer">Access controls</a>, add this tag under <code>tagOwners</code>. Keep the rest of your policy and check that broad rules do not grant the new tag unintended access.</li>
+      <li>Open <a href="https://console.tailscale.com/admin/settings/trust-credentials" target="_blank" rel="noopener noreferrer">Trust credentials</a>. Select <strong>Credential → OAuth</strong>. Select <strong>Write</strong> for <strong>Auth Keys</strong> and select <code>tag:openbot-probe</code>. Select <strong>Generate credential</strong>.</li>
+      <li>Paste the client ID and secret below, then select <strong>Connect with OAuth</strong>.</li>
+    </ol>
+    <textarea id="tailnet-policy" rows="5" cols="48" readonly aria-label="Tailnet tag policy snippet"></textarea>
+    <p><label>OAuth client ID <input id="oauth-id" autocomplete="off"></label></p>
+    <p><label>OAuth client secret <input id="oauth-secret" type="password" autocomplete="off"></label></p>
+  </section>
+  <p id="pending-device" hidden><a href="https://console.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Open Tailscale Machines</a></p>
+  <details id="manage-hosts" class="panel" hidden>
+    <summary>Remove an enrolled host</summary>
+    <p><label>Enrolled host <select id="remove-host-address"></select></label></p>
+    <button id="remove-host" class="danger" type="button">Remove host</button>
+    <p id="remove-host-status" role="status"></p>
+  </details>
+  <section id="pair-command" hidden>
+    <label for="install-command">Host setup command</label>
+    <p class="hint">Run it on the Linux host you want to add from your usual admin account. Use SSH if you’re on a different machine. The installer asks before creating or using its dedicated account. The command expires after 15 minutes. Run it from a private directory and delete pasta-setup.sh after setup.</p>
+    <textarea id="install-command" rows="4" readonly spellcheck="false"></textarea>
+    <div class="command-actions">
+      <button id="copy-install" type="button">Copy command</button>
+    </div>
+    <details>
+      <summary>Inspect the device-detection script</summary>
+      <p class="hint">This preview omits your pairing credentials.</p>
+      <textarea id="script-preview" rows="12" readonly aria-label="Host setup script"></textarea>
+    </details>
+  </section>
+  <div class="actions">
+    <button id="action" type="button" disabled>Continue</button>
+    <button id="tagged-setup" class="secondary" type="button" hidden>Use a restricted identity</button>
+  </div>
+  <p id="status" class="status" role="status"></p>
+  <noscript><p class="status">Enable JavaScript to use setup and approve maintenance jobs.</p></noscript>
+</main>
+</div>
+</body>
+</html>
