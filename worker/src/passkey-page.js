@@ -378,8 +378,8 @@ function hostSetup(token) {
 async function startAdmin() {
   const dashboard = document.querySelector('#standing-rules');
   const form = document.querySelector('#standing-form');
-  const clientSelect = document.querySelector('#standing-client');
-  const hostSelect = document.querySelector('#standing-host');
+  const clientChoices = document.querySelector('#standing-client');
+  const hostChoices = document.querySelector('#standing-host');
   const commandSelect = document.querySelector('#standing-command');
   const addRule = document.querySelector('#add-rule');
   const save = form.querySelector('[type="submit"]');
@@ -387,12 +387,15 @@ async function startAdmin() {
   let editing;
 
   const diagnostics = {
+    'read-only': 'All supported read-only checks',
     uptime: 'System uptime',
     'df -h /srv/techleaddocker': 'Docker storage usage',
   };
+  const scopeLabel = command => command === 'read-only' ? diagnostics[command] : (diagnostics[command] + ' (' + command + ')');
   const hostName = host => host.name || host.address;
-  const clientLabel = client => client.name + ' · ' + client.id.slice(-6);
-  const clientDetail = client => 'OAuth · ' + client.callback + ' · ' + client.id.slice(-6);
+  const clientName = client => client.reportedName || client.name;
+  const clientLabel = client => clientName(client) + ' · ' + client.id.slice(-6);
+  const clientDetail = client => (client.reportedName ? 'Reported via MCP · ' : 'OAuth · ') + client.callback + ' · ' + client.id.slice(-6);
 
   function node(tag, text, className) {
     const element = document.createElement(tag);
@@ -439,19 +442,36 @@ async function startAdmin() {
     select.replaceChildren(new Option(prompt, ''), ...entries.map(([value, label]) => new Option(label, value)));
   }
 
-  function choose(select, value) {
-    select.value = [...select.options].some(option => option.value === value) ? value : '';
+  function checkboxes(container, entries) {
+    container.replaceChildren(...entries.map(([value, label]) => {
+      const item = node('label', '');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = value;
+      item.append(checkbox, node('span', label));
+      return item;
+    }));
   }
 
-  function showEditor({ grant, address, command, id } = {}) {
+  function checked(container) {
+    return [...container.querySelectorAll('input:checked')].map(input => input.value);
+  }
+
+  function choose(container, selected) {
+    for (const input of container.querySelectorAll('input')) input.checked = selected.includes(input.value);
+  }
+
+  function showEditor({ clientIds = [], hostAddresses = [], command, id } = {}) {
     editing = id;
     document.querySelector('#standing-form-title').textContent = id ? 'Edit standing approval' : 'Add standing approval';
-    choose(clientSelect, grant);
-    choose(hostSelect, address);
-    choose(commandSelect, command);
+    choose(clientChoices, clientIds);
+    choose(hostChoices, hostAddresses);
+    commandSelect.value = command ?? '';
     form.hidden = false;
     status.textContent = '';
-    (clientSelect.value ? hostSelect.value ? commandSelect : hostSelect : clientSelect).focus();
+    const next = !checked(clientChoices).length ? clientChoices.querySelector('input') :
+      !checked(hostChoices).length ? hostChoices.querySelector('input') : commandSelect;
+    next?.focus();
   }
 
   function closeEditor() {
@@ -473,19 +493,19 @@ async function startAdmin() {
     const clientRows = document.querySelector('#client-rows');
     const hostRows = document.querySelector('#host-rows');
     const ruleRows = document.querySelector('#standing-list');
-    options(clientSelect, 'Select a connection', activeClients.map(client => [client.id, clientLabel(client)]));
-    options(hostSelect, 'Select a host', eligibleHosts.map(host => [
+    checkboxes(clientChoices, activeClients.map(client => [client.id, clientLabel(client)]));
+    checkboxes(hostChoices, eligibleHosts.map(host => [
       host.address, host.name ? host.name + ' (' + host.address + ')' : host.address,
     ]));
-    options(commandSelect, 'Select a diagnostic', commands.map(command => [command, diagnostics[command] + ' (' + command + ')']));
+    options(commandSelect, 'Select an action', commands.map(command => [command, scopeLabel(command)]));
     addRule.disabled = !canAddRule;
     const emptyRules = document.querySelector('#rules-empty');
     emptyRules.textContent = canAddRule ? 'No standing approvals yet.' : activeClients.length
       ? 'Pair a host with command access to create a rule.' : 'Connect an MCP client through OAuth to create a rule.';
     clientRows.replaceChildren();
     for (const client of clients) {
-      row(clientRows, identity(client.name, clientDetail(client)), pill(client.active ? 'Authorized' : 'Expired', client.active),
-        client.active && canAddRule ? rowButton('Add rule', clientLabel(client), () => showEditor({ grant: client.id })) : null);
+      row(clientRows, identity(clientName(client), clientDetail(client)), pill(client.active ? 'Authorized' : 'Expired', client.active),
+        client.active && canAddRule ? rowButton('Add rule', clientLabel(client), () => showEditor({ clientIds: [client.id] })) : null);
     }
     if (sharedBearerConfigured) {
       row(clientRows, identity('Shared bearer access', 'Bearer token'), pill('Approval required', false), null);
@@ -500,16 +520,22 @@ async function startAdmin() {
       const ready = host.state === 'ready';
       const access = ready ? 'Rule eligible' : host.state === 'removing' ? 'Removal pending' : 'Approval only';
       row(hostRows, identity(hostName(host), host.name ? host.address : ''), node('code', host.account), pill(access, ready),
-        ready && canAddRule ? rowButton('Add rule', hostName(host), () => showEditor({ address: host.address })) : null);
+        ready && canAddRule ? rowButton('Add rule', hostName(host), () => showEditor({ hostAddresses: [host.address] })) : null);
     }
     showTable('hosts', hosts.length > 0);
 
     ruleRows.replaceChildren();
     for (const rule of rules) {
-      const client = clients.find(item => item.id === rule.grant);
-      const host = hosts.find(item => item.address === rule.address);
+      const clientNames = rule.grants.map(grant => {
+        const client = clients.find(item => item.id === grant);
+        return client ? clientLabel(client) : 'Unlisted client · ' + grant.slice(-6);
+      });
+      const hostNames = rule.addresses.map(address => {
+        const host = hosts.find(item => item.address === address);
+        return host ? hostName(host) : address;
+      });
       const controls = node('span', '', 'admin-actions');
-      const label = (client ? clientLabel(client) : 'unlisted connection') + ' on ' + (host ? hostName(host) : rule.address) + ' · ' + rule.command;
+      const label = clientNames.join(', ') + ' on ' + hostNames.join(', ') + ' · ' + rule.command;
       if (canAddRule) controls.append(rowButton('Edit', label, () => showEditor(rule)));
       controls.append(rowButton('Revoke', label, async event => {
         const button = event.currentTarget;
@@ -524,9 +550,15 @@ async function startAdmin() {
           reviewStatus('error', 'Could not revoke the standing approval. Refresh and check the rule.');
         }
       }));
-      row(ruleRows, identity(client?.name ?? 'Unlisted connection', client ? clientDetail(client) : rule.grant.slice(-6)),
-        identity(host ? hostName(host) : rule.address, host?.name ? rule.address : ''),
-        node('code', rule.command), pill(rule.available ? 'Active' : 'Unavailable', rule.available), controls);
+      const memberList = labels => {
+        const cell = node('td', '', 'admin-members');
+        for (const item of labels) cell.append(node('span', item));
+        return cell;
+      };
+      const fullyAvailable = rule.clientIds.length === rule.grants.length && rule.hostAddresses.length === rule.addresses.length;
+      const ruleAction = rule.approvedCommands ? identity('Read-only checks', rule.approvedCommands.join(' · ')) : scopeLabel(rule.command);
+      row(ruleRows, memberList(clientNames), memberList(hostNames), ruleAction,
+        pill(fullyAvailable ? 'Active' : rule.available ? 'Partial' : 'Unavailable', fullyAvailable), controls);
     }
     showTable('rules', rules.length > 0);
 
@@ -540,10 +572,17 @@ async function startAdmin() {
   cancel.onclick = closeEditor;
   form.onsubmit = async event => {
     event.preventDefault();
+    const grants = checked(clientChoices);
+    const addresses = checked(hostChoices);
+    if (!grants.length || !addresses.length) {
+      reviewStatus('error', 'Select at least one MCP client and one SSH host.');
+      (grants.length ? hostChoices : clientChoices).querySelector('input')?.focus();
+      return;
+    }
     save.disabled = true;
     try {
       await post('add-standing-rule', {
-        grant: clientSelect.value, address: hostSelect.value, command: commandSelect.value, id: editing,
+        grants, addresses, command: commandSelect.value, id: editing,
       });
       await loadDashboard();
       closeEditor();

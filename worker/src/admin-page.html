@@ -64,9 +64,12 @@
       <form id="standing-form" hidden>
         <h3 id="standing-form-title">Add standing approval</h3>
         <div class="admin-form-fields">
-          <label>MCP connection <select id="standing-client" required></select></label>
-          <label>SSH host <select id="standing-host" required></select></label>
-          <label>Diagnostic <select id="standing-command" required></select></label>
+          <fieldset><legend>MCP clients</legend><div class="admin-checkboxes" id="standing-client"></div></fieldset>
+          <fieldset><legend>SSH hosts</legend><div class="admin-checkboxes" id="standing-host"></div></fieldset>
+          <div>
+            <label>Action <select id="standing-command" required aria-describedby="standing-scope-hint"></select></label>
+            <p class="hint" id="standing-scope-hint">Read-only standing approvals cover PaSTA’s supported checks. Other commands require review.</p>
+          </div>
         </div>
         <div class="admin-form-actions">
           <button type="submit">Save rule</button>
@@ -76,7 +79,7 @@
       <p class="admin-empty" id="rules-empty">No standing approvals yet.</p>
       <div class="admin-table-wrap" id="rules-table" hidden>
         <table aria-labelledby="rule-heading">
-          <thead><tr><th scope="col">MCP connection</th><th scope="col">SSH host</th><th scope="col">Command</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
+          <thead><tr><th scope="col">MCP clients</th><th scope="col">SSH hosts</th><th scope="col">Action</th><th scope="col">Status</th><th scope="col"><span class="admin-sr">Actions</span></th></tr></thead>
           <tbody id="standing-list"></tbody>
         </table>
       </div>

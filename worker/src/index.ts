@@ -1,5 +1,6 @@
 import { McpAgent } from 'agents/mcp';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { InitializeRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { classify } from './classify';
 import { assessCommand } from './assessment';
@@ -154,7 +155,21 @@ export default {
     const headers=new Headers(request.headers);
     headers.delete('Authorization');
     headers.delete(grantHeader);
-    if (typeof oauthToken === 'string') headers.set(grantHeader, oauthToken);
+    if (typeof oauthToken === 'string') {
+      headers.set(grantHeader, oauthToken);
+      if (request.method === 'POST' && !request.headers.has('Mcp-Session-Id') && request.body) {
+        const initial = InitializeRequestSchema.safeParse(await request.clone().json().catch(() => null));
+        if (initial.success) {
+          const info = initial.data.params.clientInfo;
+          const name = [info.title, info.name].find(value => typeof value === 'string' &&
+            value.trim().length > 0 && value.trim().length <= 80 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(value))?.trim();
+          if (name) {
+            await approvalStore(env).recordMcpClientName(oauthToken, name)
+              .catch(() => console.warn('Could not update the MCP client label.'));
+          }
+        }
+      }
+    }
     return transport.fetch(new Request(request,{headers}),env,ctx);
   },
 };

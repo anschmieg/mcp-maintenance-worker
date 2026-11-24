@@ -23,8 +23,25 @@ const prefix = '/passkeys';
 const empty = { executed: false };
 const standingCommands = ['uptime', 'df -h /srv/techleaddocker'] as const;
 type StandingCommand = typeof standingCommands[number];
-type McpConnection = { id: string; name: string; callback: string; connectedAt: number; expires: number };
-type StandingRule = { id: string; grant: string; address: string; enrollment: string; command: StandingCommand };
+type McpConnection = { id: string; name: string; reportedName?: string; callback: string; connectedAt: number; expires: number };
+type StandingScope = StandingCommand | 'read-only';
+type RuleHost = { address: string; enrollment: string };
+type StandingRule = {
+  id: string; grants: string[]; targets: RuleHost[]; command: StandingScope; approvedCommands?: readonly StandingCommand[];
+};
+type StoredRule = StandingRule | ({ id: string; grant: string; command: StandingCommand } & RuleHost);
+
+function expandRule(rule: StoredRule): StandingRule {
+  if ('grants' in rule) return rule;
+  const { id, grant, address, enrollment, command } = rule;
+  return { id, grants: [grant], targets: [{ address, enrollment }], command };
+}
+
+function selection(value: unknown, valid: (item: string) => boolean) {
+  const items: unknown[] = Array.isArray(value) ? value : [value];
+  if (items.length === 0 || !items.every(item => typeof item === 'string' && valid(item))) return null;
+  return [...new Set(items as string[])].sort();
+}
 const validGrant = /^[A-Za-z0-9_-]{43}$/u;
 function standingCommand(value: unknown): value is StandingCommand {
   return standingCommands.some(command => command === value);
@@ -706,9 +723,10 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
         expires_at: Date.now() + this.#jobLifetime() };
       if (canUseRule && host && !await tx.get('removing-host:' + host.address) &&
           sameEnrollmentHost(await tx.get<Host>('onboarding-host:' + host.address), host)) {
-        const rules = await tx.list<StandingRule>({ prefix: 'standing-rule:' });
-        const rule = [...rules.values()].find(item =>
-          item.grant === grant && item.address === host.address && item.enrollment === host.enrollmentId && item.command === command);
+        const rules = await tx.list<StoredRule>({ prefix: 'standing-rule:' });
+        const rule = [...rules.values()].map(expandRule).find(item =>
+          (item.command === command || item.approvedCommands?.some(approved => approved === command)) && item.grants.includes(grant) &&
+          item.targets.some(target => target.address === host.address && target.enrollment === host.enrollmentId));
         const retryLock = 'retry-lock:' + hashToken(JSON.stringify([host.address, target.execution_identity, command]));
         if (rule && !await tx.get(retryLock)) {
           await tx.put(retryLock, key);
@@ -826,13 +844,27 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
   }
 
   async recordMcpConnection(connection: McpConnection) {
-    await this.ctx.storage.put('mcp-connection:' + connection.id, connection);
+    const key = 'mcp-connection:' + connection.id;
+    await this.ctx.storage.transaction(async tx => {
+      const current = await tx.get<McpConnection>(key);
+      await tx.put<McpConnection>(key, { ...connection, reportedName: current?.reportedName });
+    });
+  }
+
+  async recordMcpClientName(grant: string, reportedName: string) {
+    const key = 'mcp-connection:' + grant;
+    await this.ctx.storage.transaction(async tx => {
+      const current = await tx.get<McpConnection>(key);
+      if (current && current.expires > Date.now() && current.reportedName !== reportedName) {
+        await tx.put<McpConnection>(key, { ...current, reportedName });
+      }
+    });
   }
 
   async standingRules(token: unknown) {
     if (!await this.#ownerAuthorized(token)) return null;
     const [rules, enrolled, legacy, removing, connections] = await Promise.all([
-      this.ctx.storage.list<StandingRule>({ prefix: 'standing-rule:' }),
+      this.ctx.storage.list<StoredRule>({ prefix: 'standing-rule:' }),
       this.ctx.storage.list<Host>({ prefix: 'onboarding-host:' }),
       this.ctx.storage.get<Host>('onboarding-host'),
       this.ctx.storage.list<Host>({ prefix: 'removing-host:' }),
@@ -854,32 +886,52 @@ export class PasskeyApproval extends DurableObject<PasskeyEnv> {
     const clients = [...connections.values()].sort((a, b) => b.connectedAt - a.connectedAt)
       .map(connection => ({ ...connection, active: connection.expires > now }));
     return {
-      clients, hosts, commands: standingCommands,
+      clients, hosts, commands: ['read-only', ...standingCommands],
       sharedBearerConfigured: (this.env.MCP_BEARER_TOKEN?.length ?? 0) >= 32,
-      rules: [...rules.values()].map(({ id, grant, address, command, enrollment }) => ({
-        id, grant, address, command,
-        available: eligibleHosts.has(address) && byAddress.get(address)?.enrollmentId === enrollment &&
-          (connections.get('mcp-connection:' + grant)?.expires ?? 0) > now,
-      })),
+      rules: [...rules.values()].map(expandRule).map(({ id, grants, targets, command, approvedCommands }) => {
+        const clientIds = grants.filter(grant => (connections.get('mcp-connection:' + grant)?.expires ?? 0) > now);
+        const hostAddresses = targets.filter(({ address, enrollment }) =>
+          eligibleHosts.has(address) && byAddress.get(address)?.enrollmentId === enrollment).map(host => host.address);
+        return {
+          id, grants, addresses: targets.map(host => host.address), command, approvedCommands, clientIds, hostAddresses,
+          available: clientIds.length > 0 && hostAddresses.length > 0,
+        };
+      }),
     };
   }
 
   async saveStandingRule(token: unknown, grant: unknown, address: unknown, command: unknown, id?: unknown) {
-    if (!await this.#ownerAuthorized(token) || typeof grant !== 'string' || !validGrant.test(grant) ||
-        typeof address !== 'string' || !validTailnetIpv4(address) || !standingCommand(command) ||
+    if (!await this.#ownerAuthorized(token) || (command !== 'read-only' && !standingCommand(command)) ||
         (id !== undefined && (typeof id !== 'string' || !uuid.test(id)))) return false;
+    const grants = selection(grant, item => validGrant.test(item));
+    const addresses = selection(address, validTailnetIpv4);
+    if (!grants || !addresses) return false;
     const ruleId = typeof id === 'string' ? id : crypto.randomUUID();
     return this.ctx.storage.transaction(async tx => {
-      const client = await tx.get<McpConnection>('mcp-connection:' + grant);
-      const host = await tx.get<Host>('onboarding-host:' + address);
-      if (!client || client.expires <= Date.now() || !host?.enrollmentId || !host.signedApproval ||
-          !host.commandExecution || await tx.get('removing-host:' + address)) return false;
-      const existing = await tx.list<StandingRule>({ prefix: 'standing-rule:' });
+      const [clients, enrolled, removing, existing] = await Promise.all([
+        tx.list<McpConnection>({ prefix: 'mcp-connection:' }),
+        tx.list<Host>({ prefix: 'onboarding-host:' }),
+        tx.list<Host>({ prefix: 'removing-host:' }),
+        tx.list<StoredRule>({ prefix: 'standing-rule:' }),
+      ]);
+      const now = Date.now();
+      if (grants.some(grantId => (clients.get('mcp-connection:' + grantId)?.expires ?? 0) <= now)) return false;
+      const targets: RuleHost[] = [];
+      for (const hostAddress of addresses) {
+        const host = enrolled.get('onboarding-host:' + hostAddress);
+        if (!host?.enrollmentId || !host.signedApproval || !host.commandExecution ||
+            removing.has('removing-host:' + hostAddress)) return false;
+        targets.push({ address: hostAddress, enrollment: host.enrollmentId });
+      }
       if (id === undefined ? existing.size >= 64 : !existing.has('standing-rule:' + ruleId)) return false;
-      const duplicate = [...existing.values()].find(rule => rule.id !== ruleId && rule.grant === grant &&
-        rule.address === address && rule.enrollment === host.enrollmentId && rule.command === command);
+      const duplicate = [...existing.values()].map(expandRule).some(rule => rule.id !== ruleId && rule.command === command &&
+        rule.grants.length === grants.length && grants.every(item => rule.grants.includes(item)) &&
+        rule.targets.length === targets.length && targets.every(target => rule.targets.some(item =>
+          item.address === target.address && item.enrollment === target.enrollment)));
       if (duplicate) return id === undefined;
-      await tx.put<StandingRule>('standing-rule:' + ruleId, { id: ruleId, grant, address, enrollment: host.enrollmentId, command });
+      await tx.put<StandingRule>('standing-rule:' + ruleId, {
+        id: ruleId, grants, targets, command, ...(command === 'read-only' ? { approvedCommands: standingCommands } : {}),
+      });
       return true;
     });
   }
@@ -1100,7 +1152,7 @@ export async function passkeyRoute(request: Request, env: PasskeyEnv) {
     return rules ? reply(rules) : reject(403);
   }
   if (path === '/add-standing-rule') {
-    return await store.saveStandingRule(sessionCookie, body.grant, body.address, body.command, body.id)
+    return await store.saveStandingRule(sessionCookie, body.grants ?? body.grant, body.addresses ?? body.address, body.command, body.id)
       ? reply({ saved: true }) : reject(403);
   }
   if (path === '/remove-standing-rule') {

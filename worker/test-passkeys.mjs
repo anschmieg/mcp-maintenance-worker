@@ -218,6 +218,27 @@ const renewedToken = (await renewed.json()).access_token;
 assert.equal((await call('passkey_test_status', oauthJob, undefined, undefined, undefined, renewedToken)).executed, false);
 const connection = await call('maintenance_connection', undefined, undefined, undefined, undefined, renewedToken);
 assert.equal(connection.connection_id, transaction);
+const namedInventory = await (await cookieRequest('standing-rules', {})).json();
+assert.equal(namedInventory.clients.find(client => client.id === transaction).reportedName, 'passkey-integration-test');
+
+const secondAuthorize = await fetch(issuer.authorization_endpoint + '?' + params);
+assert.equal(secondAuthorize.status, 200);
+const secondGrant = (await secondAuthorize.text()).match(/request: '([A-Za-z0-9_-]{43})'/u)?.[1];
+assert.ok(secondGrant && secondGrant !== transaction);
+const secondChallenge = await (await oauthPost('options', { request: secondGrant }, browserHeaders)).json();
+const secondApproval = await oauthPost('approve', {
+  request: secondGrant, id: secondChallenge.id, response: assertion(0x05, origin, secondChallenge.options.challenge),
+}, browserHeaders);
+assert.equal(secondApproval.status, 200);
+const secondCallback = new URL((await secondApproval.json()).redirect);
+const secondTokenResponse = await tokenRequest({ ...codeGrant, code: secondCallback.searchParams.get('code') });
+assert.equal(secondTokenResponse.status, 200);
+const secondToken = (await secondTokenResponse.json()).access_token;
+assert.equal((await call('maintenance_connection', undefined, undefined, undefined, undefined, secondToken)).connection_id, secondGrant);
+const sameNameInventory = await (await cookieRequest('standing-rules', {})).json();
+assert.deepEqual(sameNameInventory.clients.filter(client => client.reportedName === 'passkey-integration-test').map(client => client.id).sort(),
+  [transaction, secondGrant].sort());
+
 assert.equal((await call('maintenance_connection', undefined, undefined, undefined, undefined, mcpToken,
   { 'x-pasta-verified-oauth-grant': transaction })).connection_id, null);
 console.log('PASS: OAuth discovery, owner passkey, PKCE, single-use exchange, refresh, and MCP authorization');
@@ -676,6 +697,36 @@ assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime')).st
 assert.equal((await cookieRequest('remove-standing-rule', { id: ruleId })).status, 200);
 assert.equal((await standingRequest(randomUUID(), detectedAddress, 'uptime')).state, 'pending');
 console.log('PASS: an exact, host-bound standing approval applies only to the verified OAuth connection and can be revoked');
+
+const members = { grants: [transaction, secondGrant], addresses: [address, detectedAddress] };
+for (const command of ['write', 'execution', 'unclear']) {
+  assert.equal((await cookieRequest('add-standing-rule', { ...members, command })).status, 403);
+}
+assert.equal((await cookieRequest('add-standing-rule', { ...members, command: 'read-only' })).status, 200);
+const group = (await (await cookieRequest('standing-rules', {})).json()).rules[0];
+assert.deepEqual(group.grants, [...members.grants].sort());
+assert.deepEqual(group.hostAddresses, [...members.addresses].sort());
+assert.equal(group.command, 'read-only');
+assert.deepEqual(group.approvedCommands, ['uptime', 'df -h /srv/techleaddocker']);
+for (const host of members.addresses) {
+  for (const token of [renewedToken, secondToken]) {
+    const id = randomUUID();
+    let result = await standingRequest(id, host, 'uptime', token);
+    assert.equal(result.standing_rule, group.id);
+    for (let retry = 0; result.state === 'checking_host' && retry < 40; retry++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      result = await call('passkey_test_status', id);
+    }
+    assert.equal(result.state, 'command_completed');
+  }
+}
+const reviewedByDefault = await standingRequest(randomUUID(), detectedAddress, 'uptime; true', secondToken);
+assert.equal(reviewedByDefault.state, 'pending');
+assert.ok(reviewedByDefault.review_url);
+assert.equal((await cookieRequest('remove-standing-rule', { id: group.id })).status, 200);
+assert.equal((await standingRequest(randomUUID(), address, 'uptime', secondToken)).state, 'pending');
+console.log('PASS: a grouped standing rule matches every selected client and host while other requests require review');
+
 
 const commandJob = randomUUID();
 const expectedOutput = 'pasta-dynamic-' + randomUUID();

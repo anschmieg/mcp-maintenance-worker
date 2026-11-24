@@ -120,9 +120,9 @@ Existing enrollments keep their fixed operations. To enable request-time command
 
 ### Standing approvals
 
-The owner can view MCP connections and paired SSH hosts at `/passkeys/admin`. Use **Add rule** to select an authorized OAuth connection, a paired host, and a diagnostic. Existing OAuth connections appear after their next authenticated request. Agents that share an OpenBot OAuth connection share its rules. OAuth refresh preserves the connection ID. A newly authorized connection has a new ID.
+The owner can view MCP connections and paired SSH hosts at `/passkeys/admin`. Use **Add rule** to select one or more authorized OAuth connections, one or more paired hosts, and a read-only scope. A rule applies to every selected connection–host pair. Existing OAuth connections appear after their next authenticated request. PaSTA displays the name clients report during MCP initialization and matches permissions by OAuth connection ID. Agents that share an OpenBot OAuth connection share its rules. OAuth refresh preserves the connection ID. A newly authorized connection has a new ID.
 
-The form supports the exact commands `uptime` and `df -h /srv/techleaddocker`. PaSTA matches the verified OAuth connection, the current host enrollment, and the exact command before authorizing a single job. Other valid requests follow the normal passkey review flow. Use `passkey_test_status` to check the job outcome and see whether a standing rule authorized it.
+A rule can permit one supported check or all supported read-only checks. The rule records the exact approved commands when saved. The currently supported commands are `uptime` and `df -h /srv/techleaddocker`. PaSTA matches the verified OAuth connection, the current host enrollment, and the exact command before authorizing a single job. Other valid requests follow the normal passkey review flow. Use `passkey_test_status` to check the job outcome and see whether a standing rule authorized it.
 
 ### Optional tagged enrollment
 
