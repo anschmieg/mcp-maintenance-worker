@@ -141,7 +141,8 @@ createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const address = url.searchParams.get('address');
   const clientKey = clientKeys.get(address);
-  const visible = automaticDiscovery ? [...devices, { name: 'Auto host', address: '100.64.0.4' }] : devices;
+  const visible = automaticDiscovery ? [...devices, { name: 'Auto host', address: '100.64.0.4' },
+    { name: 'Recovery host', address: '100.64.0.5' }] : devices;
   if (url.pathname === '/approval-key' && request.method === 'POST') {
     let body = '';
     for await (const chunk of request) body += chunk;

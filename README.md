@@ -79,6 +79,8 @@ Configure `PASSKEY_ORIGIN` as a stable HTTPS origin that routes `/mcp`, `/passke
 3. Select **Get host setup command**. Run the one-line command in a Linux terminal on the machine you want to add. PaSTA checks whether the machine is visible on the connected tailnet, then the terminal shows its name. Select **1** to use the dedicated `pasta-mcp` account, **2** to choose an existing login, **3** to inspect what setup installs, or **4** or Enter to cancel. An existing login can have sudo privileges and must have a nonzero user ID. PaSTA asks before installing the key for that login and uses its existing sudo policy. The command needs sudo, Tailscale, OpenSSH Server, and curl on the host. Keep it private until pairing completes.
 4. PaSTA verifies the pinned host key and restricted SSH command during pairing. If verification fails, fix the reported issue and select **Retry SSH verification**. Select **Add another host** to generate the next command.
 
+The installer queries OpenSSH's effective `AuthorizedKeysFile` for the selected account. It supports the standard home file and a root-managed `/etc/ssh/authorized_keys/%u` directory. If verification fails and you need to select a different account, choose **Start over with a new setup command**. This revokes the failed pairing's keys in PaSTA. Remove the stale PaSTA key from the file used by the failed installer.
+
 After the owner registers, remove `PASSKEY_SETUP_TOKEN` if desired. Use the passkey to resume setup or remove enrolled hosts. Removal blocks new checks and deletes the Worker's private key. A check already running can finish. Remove the old public key from the host's `authorized_keys` file as well.
 
 ### Approve a service restart

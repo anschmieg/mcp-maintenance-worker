@@ -111,7 +111,7 @@ function hostSetup(token) {
     };
   }
 
-  async function connect() {
+  async function connect(loginWindow = null) {
     let result = await post('prepare-host', { token });
     showManagedHosts(result);
     if (result.state === 'probe_unavailable') throw new Error('Probe unavailable');
@@ -134,14 +134,32 @@ function hostSetup(token) {
         }, 'Could not use the Tailscale credential. Check that Auth Keys has Write permission for tag:openbot-probe and try again.');
       };
       bind('Sign in to Tailscale', async () => {
-        await post('start-device-login', { token });
-        await connect();
+        const tab = window.open('about:blank', '_blank');
+        if (tab) {
+          tab.opener = null;
+          tab.document.title = 'PaSTA · Tailscale sign-in';
+          tab.document.body.textContent = 'Waiting for Tailscale sign-in…';
+        }
+        try {
+          await post('start-device-login', { token });
+          await connect(tab);
+        } catch (error) {
+          try {
+            if (tab && !tab.closed && tab.location.href === 'about:blank') tab.close();
+          } catch { /* Leave an already-opened Tailscale tab available. */ }
+          throw error;
+        }
       }, 'Could not start Tailscale sign-in. Try again.');
       return;
     }
     taggedSetup.hidden = true;
     guide.hidden = true;
     for (let attempt = 0; result.state === 'tailnet_pending' && attempt < 60; attempt++) {
+      if (result.loginUrl && loginWindow && !loginWindow.closed) {
+        try { loginWindow.location.replace(result.loginUrl); }
+        catch { loginWindow.close(); }
+        loginWindow = null;
+      }
       details.textContent = result.needsDeviceApproval
         ? 'Your tailnet requires device approval. Approve the PaSTA device in Tailscale Machines.'
         : result.loginUrl ? 'Open Tailscale to complete sign-in. This page will continue when the device joins.'
@@ -154,6 +172,7 @@ function hostSetup(token) {
       await new Promise(resolve => setTimeout(resolve, 5000));
       result = await post('prepare-host', { token });
     }
+    if (loginWindow && !loginWindow.closed) loginWindow.close();
     action.hidden = false;
     if (result.state !== 'connected') {
       bind('Check Tailscale connection', connect, 'Could not check the connection. Try again.');
@@ -168,10 +187,12 @@ function hostSetup(token) {
     const panel = document.querySelector('#pair-command');
     const copy = document.querySelector('#copy-install');
     const script = document.querySelector('#script-preview');
+    const replaceFailed = document.querySelector('#replace-failed-pair');
     const activePair = sessionStorage.getItem('pasta-pair');
     const failure = 'Could not check the pairing. Try again.';
 
     async function waitForPair(pairId, retry = false) {
+      replaceFailed.hidden = true;
       for (let attempt = 0; attempt < 360; attempt++) {
         if (sessionStorage.getItem('pasta-pair') !== pairId) return;
         const progress = await post('finish-host-pairing', { token, id: pairId, retry });
@@ -196,6 +217,18 @@ function hostSetup(token) {
           };
           status.textContent = messages[progress.failure] ?? 'PaSTA could not complete the SSH check. Check network access to port 22, then retry.';
           bind('Retry SSH verification', () => waitForPair(pairId, true), failure);
+          replaceFailed.hidden = false;
+          replaceFailed.onclick = async () => {
+            replaceFailed.disabled = action.disabled = true;
+            try {
+              await replacePair(pairId);
+            } catch {
+              status.textContent = 'Could not discard the failed pairing. Try again.';
+              action.disabled = false;
+            } finally {
+              replaceFailed.disabled = false;
+            }
+          };
           return;
         }
         if (progress.state === 'pairing_canceled' || progress.state === 'pairing_expired') {
@@ -215,6 +248,7 @@ function hostSetup(token) {
     }
 
     async function newPair() {
+      replaceFailed.hidden = true;
       const pair = await post('begin-host-pairing', { token });
       sessionStorage.setItem('pasta-pair', pair.id);
       title.textContent = 'Add a host';
@@ -244,10 +278,7 @@ function hostSetup(token) {
           command.select();
         }
       };
-      bind('Replace setup command', async () => {
-        await post('cancel-pairing', { token, id: pair.id });
-        await newPair();
-      }, failure);
+      bind('Replace setup command', () => replacePair(pair.id), failure);
       void waitForPair(pair.id).catch(() => {
         if (sessionStorage.getItem('pasta-pair') !== pair.id) return;
         status.textContent = failure;
@@ -255,11 +286,14 @@ function hostSetup(token) {
       });
     }
 
+    async function replacePair(pairId) {
+      const result = await post('cancel-pairing', { token, id: pairId });
+      if (result.state !== 'invalidated') throw new Error('Pairing was not discarded');
+      await newPair();
+    }
+
     if (activePair) {
-      bind('Get a new setup command', async () => {
-        await post('cancel-pairing', { token, id: activePair });
-        await newPair();
-      }, failure);
+      bind('Get a new setup command', () => replacePair(activePair), failure);
       void waitForPair(activePair).catch(() => {
         status.textContent = failure;
         bind('Check pairing status', () => waitForPair(activePair), failure);
