@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { encodeCBOR } from '@levischuck/tiny-cbor';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -434,6 +434,14 @@ assert.match(detectedInstaller, /target_name='Auto host'/u);
 assert.match(detectedInstaller, /Use an existing login account/u);
 assert.match(detectedInstaller, /sshd -T -C/u);
 execFileSync('/bin/sh', ['-n', '-c', detectedInstaller]);
+const fileInstaller = detectedInstaller.match(/^install_generated_file\(\) \{[\s\S]+?^\}/mu)[0];
+const installDestination = receipt + '.installed';
+const installTest = 'as_admin() { "$@"; }\n' + fileInstaller + '\ninstall_generated_file "$1" 0600';
+execFileSync('/bin/sh', ['-c', installTest, 'test', installDestination], { input: 'approval configuration\n' });
+assert.equal(readFileSync(installDestination, 'utf8'), 'approval configuration\n');
+assert.equal(statSync(installDestination).mode & 0o777, 0o600);
+assert.throws(() => execFileSync('/bin/sh', ['-c', installTest, 'test', installDestination], { input: '' }));
+assert.equal(readFileSync(installDestination, 'utf8'), 'approval configuration\n');
 assert.deepEqual(await (await post('finish-host-pairing', { token: setupToken, id: detectedPair.id })).json(),
   { state: 'waiting_for_confirmation', host: 'Auto host' });
 await fetch(fixture + '/mode/wrong-pin', { method: 'POST' });
