@@ -14,7 +14,7 @@
     "@modelcontextprotocol/server": "2.4.0",
     "@simplewebauthn/browser": "14.0.0",
     "@simplewebauthn/server": "14.1.0",
-    "agents": "0.34.0",
+    "agents": "0.34.1",
     "wrangler": "4.168.0",
     "zod": "4.6.7"
   },
